@@ -87,15 +87,19 @@ impl Repository {
 
     pub fn insert_candidate(&self, candidate: IngestCandidate) -> Result<TrackId> {
         let now = now_ms();
+        let file_path = candidate.file_path.clone();
         self.conn.execute(
-            "INSERT INTO tracks (source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, style_description, suno_prompt, lyrics)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, 0, 0, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO tracks (source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, style_description, suno_prompt, lyrics)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10, ?11, ?12, ?13)",
             params![
                 candidate.source.to_string(),
                 candidate.source_id,
-                candidate.file_path,
+                file_path,
                 candidate.title,
                 candidate.artist,
+                candidate.album,
+                candidate.duration_ms,
+                candidate.cover_path,
                 candidate.source_url,
                 now,
                 candidate.style_description,
@@ -103,7 +107,15 @@ impl Repository {
                 candidate.lyrics
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        if self.conn.changes() > 0 {
+            return Ok(self.conn.last_insert_rowid());
+        }
+
+        self.conn.query_row(
+            "SELECT id FROM tracks WHERE file_path = ?1",
+            params![file_path],
+            |row| row.get(0),
+        )
     }
 
     pub fn queue_ingest(&self, request: &IngestRequest) -> Result<JobId> {

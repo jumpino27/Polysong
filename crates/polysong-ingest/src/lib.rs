@@ -3,7 +3,7 @@ use polysong_core::{IngestCandidate, IngestRequest, Result};
 pub trait IngestSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn can_handle(&self, input: &str) -> bool;
-    fn prepare(&self, request: &IngestRequest) -> Result<IngestCandidate>;
+    fn prepare(&self, request: &IngestRequest) -> Result<Vec<IngestCandidate>>;
 }
 
 #[derive(Default)]
@@ -21,7 +21,7 @@ impl IngestRegistry {
         self
     }
 
-    pub fn prepare(&self, request: &IngestRequest) -> Result<IngestCandidate> {
+    pub fn prepare(&self, request: &IngestRequest) -> Result<Vec<IngestCandidate>> {
         self.sources
             .iter()
             .find(|source| source.can_handle(&request.input))

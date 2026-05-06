@@ -6,4 +6,6 @@ edition.workspace = true
 [dependencies]
 polysong-core.workspace = true
 polysong-ingest.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 url.workspace = true

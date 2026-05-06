@@ -17,7 +17,7 @@ impl IngestSource for YoutubeSource {
             .unwrap_or(false)
     }
 
-    fn prepare(&self, request: &IngestRequest) -> Result<IngestCandidate> {
+    fn prepare(&self, request: &IngestRequest) -> Result<Vec<IngestCandidate>> {
         if !request.consent_accepted {
             return Err(PolysongError::ConsentRequired);
         }
@@ -26,17 +26,23 @@ impl IngestSource for YoutubeSource {
             PolysongError::Message("YouTube URL must include a video id".to_owned())
         })?;
 
-        Ok(IngestCandidate {
+        Ok(vec![IngestCandidate {
             source: AudioSource::Youtube,
             source_id: Some(source_id.clone()),
-            title: "Queued YouTube import".to_owned(),
+            title: format!("YouTube {source_id}"),
             artist: Some("YouTube".to_owned()),
-            source_url: Some(request.input.clone()),
+            album: None,
+            source_url: Some(canonical_youtube_url(&source_id)),
+            original_input: Some(request.input.clone()),
             file_path: format!("songs/youtube/{source_id}.mp3"),
+            download_url: None,
+            cover_url: None,
+            cover_path: None,
+            duration_ms: None,
             style_description: None,
             suno_prompt: None,
             lyrics: None,
-        })
+        }])
     }
 }
 
@@ -49,4 +55,32 @@ fn parse_video_id(input: &str) -> Option<String> {
     url.query_pairs()
         .find(|(key, _)| key == "v")
         .map(|(_, value)| value.into_owned())
+}
+
+fn canonical_youtube_url(video_id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={video_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_video_id;
+
+    #[test]
+    fn parses_equivalent_youtube_links() {
+        let expected = Some("r_0JjYUe5jo".to_owned());
+        assert_eq!(
+            parse_video_id(
+                "https://www.youtube.com/watch?v=r_0JjYUe5jo&list=RDr_0JjYUe5jo&start_radio=1"
+            ),
+            expected
+        );
+        assert_eq!(
+            parse_video_id("https://www.youtube.com/watch?v=r_0JjYUe5jo&list=RDr_0JjYUe5jo"),
+            expected
+        );
+        assert_eq!(
+            parse_video_id("https://youtu.be/r_0JjYUe5jo?si=iuygMA26CwADVo6D"),
+            expected
+        );
+    }
 }

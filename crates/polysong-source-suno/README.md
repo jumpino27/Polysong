@@ -6,8 +6,8 @@ The reference backend stores Suno metadata fields such as `source_id`, `source_u
 
 Implementation notes for the durable fetcher:
 
-- Canonicalize `suno.com/song/{id}` and short-link inputs before deduplication.
+- Canonicalize `suno.com/song/{id}`, resolve `suno.com/s/{short}` through redirect, and expand `suno.com/playlist/{id}` inputs before deduplication.
 - Prefer the Suno clip API for metadata and use HTML/CDN fallbacks only after that fails.
 - Treat style tags as first-class metadata. Prefer tag/style fields over prompt fields when deriving `style_description`.
-- Persist upstream audio and cover URLs immediately, then let a worker download and validate durable local copies under `songs/suno/`.
+- Persist upstream audio and cover URLs immediately, then let the Tauri materializer download and validate durable local copies under `songs/suno/` and `songs/covers/`.
 - Validate downloaded audio and image signatures instead of trusting content type alone.

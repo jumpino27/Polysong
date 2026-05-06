@@ -22,7 +22,7 @@ impl IngestSource for LocalSource {
             .unwrap_or(false)
     }
 
-    fn prepare(&self, request: &IngestRequest) -> Result<IngestCandidate> {
+    fn prepare(&self, request: &IngestRequest) -> Result<Vec<IngestCandidate>> {
         let path = Path::new(&request.input);
         let title = path
             .file_stem()
@@ -30,17 +30,23 @@ impl IngestSource for LocalSource {
             .unwrap_or("Local track")
             .to_owned();
 
-        Ok(IngestCandidate {
+        Ok(vec![IngestCandidate {
             source: AudioSource::Local,
             source_id: None,
             title,
             artist: None,
+            album: None,
             source_url: None,
+            original_input: Some(request.input.clone()),
             file_path: local_library_path(path),
+            download_url: None,
+            cover_url: None,
+            cover_path: None,
+            duration_ms: None,
             style_description: None,
             suno_prompt: None,
             lyrics: None,
-        })
+        }])
     }
 }
 
