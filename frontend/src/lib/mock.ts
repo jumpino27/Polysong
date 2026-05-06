@@ -10,18 +10,24 @@ import type {
   TrackPatch,
 } from '../types'
 
-let tracks: Track[] = []
+interface MockState {
+  tracks: Track[]
+  playlists: Playlist[]
+  jobs: IngestJob[]
+  settings: AppSettings
+}
 
-let playlists: Playlist[] = []
+const STORAGE_KEY = 'polysong.browserPreviewState.v1'
 
-let jobs: IngestJob[] = []
-let settings: AppSettings = {
+const defaultSettings: AppSettings = {
   theme: 'dark',
   audioRoot: 'songs',
   youtubeConsent: false,
   sunoAdvancedEnabled: false,
   maxConcurrentDownloads: 2,
 }
+
+let { tracks, playlists, jobs, settings } = loadState()
 
 export async function mockListTracks(filter: TrackFilter) {
   let result = [...tracks]
@@ -40,10 +46,12 @@ export async function mockListTracks(filter: TrackFilter) {
 
 export async function mockUpdateTrack(id: number, patch: TrackPatch) {
   tracks = tracks.map((track) => (track.id === id ? { ...track, ...patch } : track))
+  saveState()
 }
 
 export async function mockDeleteTrack(id: number) {
   tracks = tracks.filter((track) => track.id !== id)
+  saveState()
 }
 
 export async function mockListPlaylists() {
@@ -60,6 +68,7 @@ export async function mockCreatePlaylist(name: string, description?: string | nu
     updatedAt: Date.now(),
   }
   playlists = [playlist, ...playlists]
+  saveState()
   return playlist
 }
 
@@ -98,6 +107,7 @@ export async function mockIngest(request: IngestRequest) {
     ]
   }
 
+  saveState()
   return job.id
 }
 
@@ -111,6 +121,7 @@ export async function mockGetSettings() {
 
 export async function mockUpdateSettings(patch: SettingsPatch) {
   settings = { ...settings, ...patch }
+  saveState()
   return settings
 }
 
@@ -152,4 +163,38 @@ function extensionFromPath(input: string) {
 
 function cleanId(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, '') || String(Date.now())
+}
+
+function loadState(): MockState {
+  if (typeof window === 'undefined') {
+    return emptyState()
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return emptyState()
+    const parsed = JSON.parse(raw) as Partial<MockState>
+    return {
+      tracks: parsed.tracks ?? [],
+      playlists: parsed.playlists ?? [],
+      jobs: parsed.jobs ?? [],
+      settings: { ...defaultSettings, ...parsed.settings },
+    }
+  } catch {
+    return emptyState()
+  }
+}
+
+function saveState() {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tracks, playlists, jobs, settings }))
+}
+
+function emptyState(): MockState {
+  return {
+    tracks: [],
+    playlists: [],
+    jobs: [],
+    settings: defaultSettings,
+  }
 }
