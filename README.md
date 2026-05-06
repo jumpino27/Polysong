@@ -2,6 +2,8 @@
 
 Polysong is a local-first desktop music library scaffold built with Tauri 2, Rust, SQLite, React, and the Web Audio API. It unifies local files, YouTube URLs, and Suno songs into one library with playlists, ingest jobs, light/dark themes, and a full-window visualizer.
 
+Imported audio is assigned under the app data folder as `songs/suno/`, `songs/youtube/`, or `songs/local/`. The database is created empty; it does not seed demo tracks.
+
 ## Run
 
 ```powershell
@@ -26,4 +28,3 @@ Polysong is for content you own or have the right to download and keep locally.
 - YouTube ingestion is for content the user has rights to download, such as their own uploads, Creative Commons material, public-domain recordings, or cases allowed by local law.
 
 The app surfaces this guidance in onboarding and source-specific ingest UI. Backend source modules keep public/Suno advanced behavior explicit rather than silent.
-

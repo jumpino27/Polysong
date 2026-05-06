@@ -1,7 +1,7 @@
 use chrono::Utc;
 use polysong_core::{
     AppSettings, AudioSource, IngestCandidate, IngestJob, IngestRequest, IngestStatus, JobId,
-    Playlist, SettingsPatch, ThemeMode, Track, TrackFilter, TrackId, TrackPatch,
+    Playlist, SettingsPatch, Track, TrackFilter, TrackId, TrackPatch,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::path::Path;
@@ -18,7 +18,7 @@ impl Repository {
         let conn = Connection::open(path)?;
         let repo = Self { conn };
         repo.migrate()?;
-        repo.seed_if_empty()?;
+        repo.cleanup_placeholder_content()?;
         Ok(repo)
     }
 
@@ -27,7 +27,7 @@ impl Repository {
             conn: Connection::open_in_memory()?,
         };
         repo.migrate()?;
-        repo.seed_if_empty()?;
+        repo.cleanup_placeholder_content()?;
         Ok(repo)
     }
 
@@ -319,33 +319,26 @@ impl Repository {
         )
     }
 
-    fn seed_if_empty(&self) -> Result<()> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
-        if count > 0 {
-            return Ok(());
-        }
-
-        let now = now_ms();
+    fn cleanup_placeholder_content(&self) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO tracks (source, source_id, file_path, title, artist, album, duration_ms, source_url, favorite, play_count, added_at, style_description, suno_prompt, lyrics)
-             VALUES
-             ('suno', 'demo-suno-01', 'audio/suno/demo-suno-01.mp3', 'Glass Orchard Engine', 'Jumpino', 'Drafts from Suno', 206000, 'https://suno.com/song/demo-suno-01', 1, 4, ?1, 'Industrial art-pop with clipped machine percussion, choir pads, gliding bass, and a bright melodic hook.', 'A kinetic song about a city-sized music machine growing fruit made of light.', 'Verse lines and chorus placeholders are preserved here when Suno metadata provides lyrics.'),
-             ('youtube', 'demo-youtube-01', 'audio/youtube/demo-youtube-01.mp3', 'Public Domain Radio Sweep', 'Archive Import', 'Rights-cleared queue', 183000, 'https://youtube.com/watch?v=demo-youtube-01', 0, 1, ?2, NULL, NULL, NULL),
-             ('local', NULL, 'audio/local/night-drive.flac', 'Night Drive Reference', 'Local Files', 'Inbox', 251000, NULL, 0, 8, ?3, NULL, NULL, NULL)",
-            params![now, now - 2_000, now - 4_000],
+            "DELETE FROM tracks
+             WHERE source_id IN ('demo-suno-01', 'demo-youtube-01')
+                OR file_path IN ('audio/suno/demo-suno-01.mp3', 'audio/youtube/demo-youtube-01.mp3', 'audio/local/night-drive.flac')
+                OR title IN ('Glass Orchard Engine', 'Public Domain Radio Sweep', 'Night Drive Reference')",
+            [],
         )?;
         self.conn.execute(
-            "INSERT INTO playlists (name, description, created_at, updated_at) VALUES
-             ('Suno candidates', 'Generated tracks that need metadata review.', ?1, ?1),
-             ('Visualizer checks', 'Songs used to test bars, waveform, and radial modes.', ?2, ?2)",
-            params![now, now - 1_000],
+            "DELETE FROM playlists
+             WHERE name IN ('Suno candidates', 'Visualizer checks')
+               AND id NOT IN (SELECT DISTINCT playlist_id FROM playlist_tracks)",
+            [],
         )?;
-        self.update_settings(SettingsPatch {
-            theme: Some(ThemeMode::Dark),
-            ..SettingsPatch::default()
-        })?;
+        self.conn.execute(
+            "UPDATE settings
+             SET value = replace(value, '\"audioRoot\":\"audio\"', '\"audioRoot\":\"songs\"')
+             WHERE key = 'app' AND value LIKE '%\"audioRoot\":\"audio\"%'",
+            [],
+        )?;
         Ok(())
     }
 }

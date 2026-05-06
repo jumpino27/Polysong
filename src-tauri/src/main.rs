@@ -147,6 +147,9 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            for source in ["suno", "youtube", "local"] {
+                std::fs::create_dir_all(data_dir.join("songs").join(source))?;
+            }
             let db_path = data_dir.join("polysong.db");
             let repo = Repository::open(db_path)?;
             let registry = IngestRegistry::new()

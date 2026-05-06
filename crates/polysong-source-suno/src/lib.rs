@@ -22,16 +22,22 @@ impl IngestSource for SunoSource {
             return Err(PolysongError::ConsentRequired);
         }
 
-        let source_id = parse_suno_id(&request.input).unwrap_or_else(|| "pending-suno".to_owned());
+        let source_id = parse_suno_id(&request.input).ok_or_else(|| {
+            PolysongError::Message(
+                "Suno URL must look like https://suno.com/song/<id> or https://suno.com/s/<id>"
+                    .to_owned(),
+            )
+        })?;
+        let source_url = canonical_suno_url(&source_id, &request.input);
 
         Ok(IngestCandidate {
             source: AudioSource::Suno,
             source_id: Some(source_id.clone()),
-            title: "Queued Suno import".to_owned(),
+            title: format!("Suno {source_id}"),
             artist: Some("Suno".to_owned()),
-            source_url: Some(request.input.clone()),
-            file_path: format!("audio/suno/{source_id}.mp3"),
-            style_description: Some("Style description will be filled from Suno metadata when the authenticated fetcher resolves the song.".to_owned()),
+            source_url: Some(source_url),
+            file_path: format!("songs/suno/{source_id}.mp3"),
+            style_description: None,
             suno_prompt: None,
             lyrics: None,
         })
@@ -40,8 +46,43 @@ impl IngestSource for SunoSource {
 
 fn parse_suno_id(input: &str) -> Option<String> {
     let url = Url::parse(input).ok()?;
-    url.path_segments()?
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host != "suno.com" && !host.ends_with(".suno.com") {
+        return None;
+    }
+
+    let segments = url
+        .path_segments()?
         .filter(|segment| !segment.is_empty())
-        .next_back()
-        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["song", id] | ["s", id] => Some((*id).to_owned()),
+        [id] if id.len() >= 8 => Some((*id).to_owned()),
+        _ => None,
+    }
+}
+
+fn canonical_suno_url(source_id: &str, input: &str) -> String {
+    if input.contains("/s/") {
+        format!("https://suno.com/s/{source_id}")
+    } else {
+        format!("https://suno.com/song/{source_id}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_suno_id;
+
+    #[test]
+    fn parses_song_and_short_suno_links() {
+        assert_eq!(
+            parse_suno_id("https://suno.com/song/x05KvNFq7Tn5KqyR"),
+            Some("x05KvNFq7Tn5KqyR".to_owned())
+        );
+        assert_eq!(
+            parse_suno_id("https://suno.com/s/x05KvNFq7Tn5KqyR"),
+            Some("x05KvNFq7Tn5KqyR".to_owned())
+        );
+    }
 }

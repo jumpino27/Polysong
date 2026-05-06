@@ -22,18 +22,17 @@ impl IngestSource for YoutubeSource {
             return Err(PolysongError::ConsentRequired);
         }
 
-        let source_id = parse_video_id(&request.input);
-        let file_name = source_id
-            .clone()
-            .unwrap_or_else(|| "pending-youtube".to_owned());
+        let source_id = parse_video_id(&request.input).ok_or_else(|| {
+            PolysongError::Message("YouTube URL must include a video id".to_owned())
+        })?;
 
         Ok(IngestCandidate {
             source: AudioSource::Youtube,
-            source_id,
+            source_id: Some(source_id.clone()),
             title: "Queued YouTube import".to_owned(),
             artist: Some("YouTube".to_owned()),
             source_url: Some(request.input.clone()),
-            file_path: format!("audio/youtube/{file_name}.mp3"),
+            file_path: format!("songs/youtube/{source_id}.mp3"),
             style_description: None,
             suno_prompt: None,
             lyrics: None,

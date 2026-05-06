@@ -187,7 +187,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
-            audio_root: "audio".to_owned(),
+            audio_root: "songs".to_owned(),
             youtube_consent: false,
             suno_advanced_enabled: false,
             max_concurrent_downloads: 2,

@@ -9,6 +9,5 @@ Implementation notes for the durable fetcher:
 - Canonicalize `suno.com/song/{id}` and short-link inputs before deduplication.
 - Prefer the Suno clip API for metadata and use HTML/CDN fallbacks only after that fails.
 - Treat style tags as first-class metadata. Prefer tag/style fields over prompt fields when deriving `style_description`.
-- Persist upstream audio and cover URLs immediately, then let a worker download and validate durable local copies.
+- Persist upstream audio and cover URLs immediately, then let a worker download and validate durable local copies under `songs/suno/`.
 - Validate downloaded audio and image signatures instead of trusting content type alone.
-

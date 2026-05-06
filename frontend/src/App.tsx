@@ -53,7 +53,7 @@ import type { AppSettings, AudioSource, IngestJob, Playlist, Track, VisualizerMo
 
 const defaultSettings: AppSettings = {
   theme: 'dark',
-  audioRoot: 'audio',
+  audioRoot: 'songs',
   youtubeConsent: false,
   sunoAdvancedEnabled: false,
   maxConcurrentDownloads: 2,
@@ -502,7 +502,7 @@ function IngestDialog({
   onSettings: (patch: Partial<AppSettings>) => Promise<void>
   onDone: () => void
 }) {
-  const [input, setInput] = useState('https://suno.com/song/demo-suno-01')
+  const [input, setInput] = useState('https://suno.com/s/x05KvNFq7Tn5KqyR')
   const source = inferSource(input)
   const needsYoutubeConsent = source === 'youtube' && !settings.youtubeConsent
   const needsSunoConsent = source === 'suno' && !settings.sunoAdvancedEnabled
@@ -622,7 +622,7 @@ function SettingsDialog({
         <div className="notice">
           <strong>Audio root</strong>
           <p>
-            <code style={{ fontFamily: 'var(--font-mono)' }}>{settings.audioRoot}</code>. Sidecars and authenticated download workers are scaffolded as backend modules.
+            <code style={{ fontFamily: 'var(--font-mono)' }}>{settings.audioRoot}</code>. Imports are assigned to `songs/suno`, `songs/youtube`, or `songs/local` under the app data directory.
           </p>
         </div>
         <div className="modal-footer">

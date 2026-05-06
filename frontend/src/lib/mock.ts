@@ -10,76 +10,14 @@ import type {
   TrackPatch,
 } from '../types'
 
-let tracks: Track[] = [
-  {
-    id: 1,
-    source: 'suno',
-    sourceId: 'demo-suno-01',
-    filePath: 'audio/suno/demo-suno-01.mp3',
-    title: 'Glass Orchard Engine',
-    artist: 'Jumpino',
-    album: 'Drafts from Suno',
-    durationMs: 206000,
-    sourceUrl: 'https://suno.com/song/demo-suno-01',
-    favorite: true,
-    playCount: 4,
-    addedAt: Date.now() - 1000,
-    styleDescription:
-      'Industrial art-pop with clipped machine percussion, choir pads, gliding bass, and a bright melodic hook.',
-    sunoPrompt: 'A kinetic song about a city-sized music machine growing fruit made of light.',
-    lyrics: 'Verse and chorus metadata appears here when Suno returns lyrics.',
-  },
-  {
-    id: 2,
-    source: 'youtube',
-    sourceId: 'demo-youtube-01',
-    filePath: 'audio/youtube/demo-youtube-01.mp3',
-    title: 'Public Domain Radio Sweep',
-    artist: 'Archive Import',
-    album: 'Rights-cleared queue',
-    durationMs: 183000,
-    sourceUrl: 'https://youtube.com/watch?v=demo-youtube-01',
-    favorite: false,
-    playCount: 1,
-    addedAt: Date.now() - 4000,
-  },
-  {
-    id: 3,
-    source: 'local',
-    filePath: 'audio/local/night-drive.flac',
-    title: 'Night Drive Reference',
-    artist: 'Local Files',
-    album: 'Inbox',
-    durationMs: 251000,
-    favorite: false,
-    playCount: 8,
-    addedAt: Date.now() - 9000,
-  },
-]
+let tracks: Track[] = []
 
-let playlists: Playlist[] = [
-  {
-    id: 1,
-    name: 'Suno candidates',
-    description: 'Generated tracks that need metadata review.',
-    trackCount: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  },
-  {
-    id: 2,
-    name: 'Visualizer checks',
-    description: 'Songs used to test bars, waveform, and radial modes.',
-    trackCount: 3,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  },
-]
+let playlists: Playlist[] = []
 
 let jobs: IngestJob[] = []
 let settings: AppSettings = {
   theme: 'dark',
-  audioRoot: 'audio',
+  audioRoot: 'songs',
   youtubeConsent: false,
   sunoAdvancedEnabled: false,
   maxConcurrentDownloads: 2,
@@ -139,24 +77,22 @@ export async function mockIngest(request: IngestRequest) {
   jobs = [job, ...jobs]
 
   if (request.consentAccepted) {
-    const sourceId = request.input.split('/').filter(Boolean).pop() ?? String(job.id)
+    const sourceId = sourceIdFromInput(request.input, request.source)
+    const extension = request.source === 'local' ? extensionFromPath(request.input) : 'mp3'
     tracks = [
       {
         id: job.id,
         source: request.source,
         sourceId,
-        filePath: `audio/${request.source}/${sourceId}.mp3`,
-        title: request.source === 'suno' ? 'Queued Suno import' : 'Queued URL import',
+        filePath: `songs/${request.source}/${sourceId}.${extension}`,
+        title: request.source === 'suno' ? `Suno ${sourceId}` : request.source === 'youtube' ? `YouTube ${sourceId}` : sourceId,
         artist: request.source === 'suno' ? 'Suno' : request.source === 'youtube' ? 'YouTube' : 'Local Files',
         durationMs: null,
         sourceUrl: request.source === 'local' ? null : request.input,
         favorite: false,
         playCount: 0,
         addedAt: Date.now(),
-        styleDescription:
-          request.source === 'suno'
-            ? 'Waiting for Suno tags/style metadata from the authenticated clip fetcher.'
-            : null,
+        styleDescription: null,
       },
       ...tracks,
     ]
@@ -182,4 +118,38 @@ export function inferSource(input: string): AudioSource {
   if (/suno\.com/i.test(input)) return 'suno'
   if (/youtu\.be|youtube\.com/i.test(input)) return 'youtube'
   return 'local'
+}
+
+function sourceIdFromInput(input: string, source: AudioSource) {
+  if (source === 'youtube') {
+    try {
+      const url = new URL(input)
+      if (url.hostname.includes('youtu.be')) return cleanId(url.pathname.split('/').filter(Boolean)[0])
+      return cleanId(url.searchParams.get('v') ?? String(Date.now()))
+    } catch {
+      return String(Date.now())
+    }
+  }
+
+  if (source === 'local') {
+    const leaf = input.split(/[\\/]/).filter(Boolean).pop() ?? `local-${Date.now()}`
+    return cleanId(leaf.replace(/\.[^.]+$/, ''))
+  }
+
+  try {
+    const url = new URL(input)
+    const segments = url.pathname.split('/').filter(Boolean)
+    if ((segments[0] === 'song' || segments[0] === 's') && segments[1]) return cleanId(segments[1])
+    return cleanId(segments.at(-1) ?? String(Date.now()))
+  } catch {
+    return String(Date.now())
+  }
+}
+
+function extensionFromPath(input: string) {
+  return input.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3'
+}
+
+function cleanId(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '') || String(Date.now())
 }
