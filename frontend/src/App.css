@@ -1655,7 +1655,7 @@ button:focus-visible,
 @media (max-width: 880px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto auto var(--player-h);
+    grid-template-rows: auto auto auto var(--player-h);
     height: auto;
     min-height: 100vh;
     overflow: visible;
@@ -1680,6 +1680,22 @@ button:focus-visible,
     border-left: 0;
   }
 
+  .sidebar.left {
+    grid-row: 2;
+  }
+
+  .workspace {
+    grid-row: 1;
+  }
+
+  .sidebar.right {
+    grid-row: 3;
+  }
+
+  .player-bar {
+    grid-row: 4;
+  }
+
   .sidebar.closed {
     height: 0;
     padding: 0;
@@ -1689,7 +1705,7 @@ button:focus-visible,
   .workspace {
     height: auto;
     overflow: visible;
-    padding: 14px 16px 24px;
+    padding: 14px 16px calc(var(--player-h) + 24px);
   }
 
   .topbar {
@@ -1699,8 +1715,7 @@ button:focus-visible,
   }
 
   .player-bar {
-    position: sticky;
-    bottom: 0;
+    position: static;
     grid-template-columns: 1fr auto auto;
     padding: 0 14px;
     gap: 12px;
