@@ -5,9 +5,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'ghost' | 'quiet' | 'danger'
 }
 
-export function Button({ icon, variant = 'ghost', children, className = '', ...props }: ButtonProps) {
+export function Button({ icon, variant = 'ghost', children, className = '', type = 'button', ...props }: ButtonProps) {
+  const composed = ['button', `button-${variant}`, !children && icon ? 'button-icon' : '', className]
+    .filter(Boolean)
+    .join(' ')
+
   return (
-    <button className={`button button-${variant} ${className}`} type="button" {...props}>
+    <button className={composed} type={type} {...props}>
       {icon}
       {children && <span>{children}</span>}
     </button>

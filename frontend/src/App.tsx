@@ -1,3 +1,22 @@
+/**
+ * Polysong — local-first music workstation.
+ *
+ * Composition. The shell is a three-column workstation grid: a slim left rail
+ * with the Polysong wordmark, source filters with live counts, and a playlist
+ * tray; a center workspace whose sticky toolbar carries panel toggles, search,
+ * the ingest action, theme, and settings; a right rail that opens with a live
+ * audio visualizer card, a segmented mode picker, a "Selected" detail block
+ * that surfaces Suno style descriptions as a quoted callout, and the ingest
+ * job queue. A full-width player bar pins to the bottom across all three
+ * columns. The library header announces the page with a single h1 — "Tracks
+ * from local files, YouTube, and Suno in one queue." Below it sits a dense,
+ * tactile track list whose Suno rows wear their style description as a first-
+ * class chip. Both side rails collapse via animated grid-column transitions
+ * so closed panels do not leave empty gutters. Fullscreen mode swaps the
+ * entire shell for an edge-to-edge visualizer overlay whose controls fade
+ * after a brief idle and reappear on mouse movement.
+ */
+
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ChevronLeft,
@@ -6,15 +25,17 @@ import {
   Eye,
   EyeOff,
   ListMusic,
+  Maximize2,
+  Minimize2,
   Moon,
   Pause,
   Play,
   Plus,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Upload,
-  Waves,
   X,
 } from 'lucide-react'
 import './App.css'
@@ -38,6 +59,8 @@ const defaultSettings: AppSettings = {
   maxConcurrentDownloads: 2,
 }
 
+const SOURCES: ReadonlyArray<AudioSource | 'all'> = ['all', 'suno', 'youtube', 'local']
+
 function App() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
@@ -56,6 +79,7 @@ function App() {
   const [fullscreen, setFullscreen] = useState(false)
   const [overlayVisible, setOverlayVisible] = useState(true)
   const [playing, setPlaying] = useState(false)
+  const [volume, setVolume] = useState(0.82)
 
   const refresh = useCallback(async () => {
     const filter = {
@@ -116,6 +140,11 @@ function App() {
     [tracks],
   )
 
+  const totalDurationMs = useMemo(
+    () => tracks.reduce((sum, track) => sum + (track.durationMs ?? 0), 0),
+    [tracks],
+  )
+
   const selectAndPlay = async (track: Track) => {
     setActiveTrack(track)
     audioEngine.load(track)
@@ -148,18 +177,37 @@ function App() {
       >
         {renderVisualizer()}
         <div className={`fullscreen-overlay ${overlayVisible ? 'visible' : ''}`}>
-          <div>
-            <p>Now playing</p>
-            <h1>{activeTrack?.title ?? 'No track selected'}</h1>
-            <span>{activeTrack?.styleDescription ?? activeTrack?.artist ?? 'Load a track from the library'}</span>
+          <div className="fullscreen-overlay-top">
+            <span className="eyebrow">Now playing — Polysong</span>
+            <Button icon={<Minimize2 size={17} />} onClick={() => setFullscreen(false)}>
+              Exit fullscreen
+            </Button>
           </div>
-          <div className="fullscreen-controls">
-            <Button icon={playing ? <Pause size={18} /> : <Play size={18} />} variant="primary" onClick={togglePlay}>
-              {playing ? 'Pause' : 'Play'}
-            </Button>
-            <Button icon={<X size={18} />} onClick={() => setFullscreen(false)}>
-              Exit
-            </Button>
+          <div />
+          <div className="fullscreen-overlay-bottom">
+            <div className="fullscreen-overlay-text">
+              <h1>{activeTrack?.title ?? 'No track selected'}</h1>
+              {activeTrack?.styleDescription ? (
+                <p className="style-line">
+                  <Sparkles size={18} />
+                  <span>{activeTrack.styleDescription}</span>
+                </p>
+              ) : (
+                <p className="style-line">
+                  <span>{activeTrack?.artist ?? 'Load a track from the library to begin.'}</span>
+                </p>
+              )}
+            </div>
+            <div className="fullscreen-controls">
+              <Button
+                icon={playing ? <Pause size={18} /> : <Play size={18} />}
+                variant="primary"
+                onClick={togglePlay}
+              >
+                {playing ? 'Pause' : 'Play'}
+              </Button>
+              <Button icon={<X size={18} />} onClick={() => setFullscreen(false)} aria-label="Exit fullscreen" />
+            </div>
           </div>
         </div>
       </main>
@@ -167,73 +215,140 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className={`sidebar left ${leftPanelOpen ? 'open' : 'closed'}`}>
+    <main
+      className="app-shell"
+      data-left={leftPanelOpen ? 'open' : 'closed'}
+      data-right={rightPanelOpen ? 'open' : 'closed'}
+    >
+      <aside className={`sidebar left ${leftPanelOpen ? 'open' : 'closed'}`} aria-label="Sources and playlists">
         <div className="brand">
-          <Disc3 size={24} />
-          <div>
+          <div className="brand-mark" aria-hidden>
+            <Disc3 size={20} strokeWidth={2.4} />
+          </div>
+          <div className="brand-name">
             <strong>Polysong</strong>
-            <span>local-first library</span>
+            <span>local-first lab</span>
           </div>
         </div>
-        <nav className="source-nav" aria-label="Sources">
-          {(['all', 'suno', 'youtube', 'local'] as const).map((value) => (
-            <button className={source === value ? 'selected' : ''} type="button" onClick={() => setSource(value)}>
-              <span>{value === 'all' ? 'All sources' : value}</span>
-              <em>{value === 'all' ? tracks.length : totals[value]}</em>
-            </button>
-          ))}
-        </nav>
-        <section className="playlist-panel">
-          <div className="panel-heading">
-            <h2>Playlists</h2>
-            <Button icon={<Plus size={16} />} aria-label="Create playlist" onClick={() => void api.createPlaylist('New playlist').then(refresh)} />
+
+        <section aria-labelledby="sources-heading">
+          <div className="rail-heading">
+            <h2 id="sources-heading">Sources</h2>
+            <span className="rail-heading-count">{tracks.length}</span>
           </div>
-          {playlists.map((playlist) => (
-            <button className="playlist-item" type="button" key={playlist.id}>
-              <ListMusic size={16} />
-              <span>{playlist.name}</span>
-              <em>{playlist.trackCount}</em>
-            </button>
-          ))}
+          <nav className="source-nav" aria-label="Filter by source">
+            {SOURCES.map((value) => (
+              <button
+                key={value}
+                type="button"
+                data-source={value}
+                className={source === value ? 'selected' : ''}
+                onClick={() => setSource(value)}
+                aria-pressed={source === value}
+              >
+                <span className="src-dot" aria-hidden />
+                <span className="src-label">{value === 'all' ? 'All sources' : value}</span>
+                <span className="src-count">{value === 'all' ? tracks.length : totals[value]}</span>
+              </button>
+            ))}
+          </nav>
+        </section>
+
+        <section className="playlist-panel" aria-labelledby="playlists-heading">
+          <div className="rail-heading">
+            <h2 id="playlists-heading">Playlists</h2>
+            <Button
+              icon={<Plus size={15} />}
+              variant="quiet"
+              aria-label="Create playlist"
+              onClick={() => void api.createPlaylist('New playlist').then(refresh)}
+            />
+          </div>
+          <div className="playlist-list">
+            {playlists.length === 0 && <p className="playlist-empty">No playlists yet.</p>}
+            {playlists.map((playlist) => (
+              <button className="playlist-item" type="button" key={playlist.id}>
+                <ListMusic size={15} />
+                <span>{playlist.name}</span>
+                <em>{playlist.trackCount}</em>
+              </button>
+            ))}
+          </div>
         </section>
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
+        <header className="topbar" role="toolbar" aria-label="Library controls">
           <Button
             icon={leftPanelOpen ? <ChevronLeft size={17} /> : <ChevronRight size={17} />}
-            aria-label="Toggle source panel"
+            variant="ghost"
+            aria-label={leftPanelOpen ? 'Collapse source panel' : 'Expand source panel'}
             onClick={() => setLeftPanelOpen((value) => !value)}
           />
           <label className="search">
-            <Search size={17} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search title, artist, album, or Suno style" />
+            <Search size={16} />
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search title, artist, album, or Suno style"
+              aria-label="Search library"
+            />
           </label>
-          <Button icon={<Upload size={17} />} variant="primary" onClick={() => setIngestOpen(true)}>
+          <Button icon={<Upload size={16} />} variant="primary" onClick={() => setIngestOpen(true)}>
             Ingest
           </Button>
-          <Button icon={settings.theme === 'light' ? <Moon size={17} /> : <Sun size={17} />} onClick={() => updateSettings({ theme: settings.theme === 'light' ? 'dark' : 'light' })} />
-          <Button icon={<Settings size={17} />} onClick={() => setSettingsOpen(true)} />
+          <span className="topbar-divider" aria-hidden />
           <Button
-            icon={rightPanelOpen ? <EyeOff size={17} /> : <Eye size={17} />}
-            aria-label="Toggle detail panel"
+            icon={settings.theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+            variant="ghost"
+            aria-label={settings.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+            onClick={() => updateSettings({ theme: settings.theme === 'light' ? 'dark' : 'light' })}
+          />
+          <Button
+            icon={<Settings size={16} />}
+            variant="ghost"
+            aria-label="Open settings"
+            onClick={() => setSettingsOpen(true)}
+          />
+          <Button
+            icon={rightPanelOpen ? <EyeOff size={16} /> : <Eye size={16} />}
+            variant="ghost"
+            aria-label={rightPanelOpen ? 'Hide detail panel' : 'Show detail panel'}
             onClick={() => setRightPanelOpen((value) => !value)}
           />
         </header>
 
         <section className="library-header">
-          <div>
-            <p>Unified music library</p>
-            <h1>Tracks from local files, YouTube, and Suno in one queue.</h1>
+          <div className="library-header-text">
+            <span className="eyebrow">Unified library</span>
+            <h1>
+              Tracks from local files, YouTube, and Suno in <em>one queue</em>.
+            </h1>
+            <div className="library-header-meta">
+              <span><strong>{tracks.length}</strong> tracks</span>
+              <span><strong>{totals.suno}</strong> Suno</span>
+              <span><strong>{totals.youtube}</strong> YouTube</span>
+              <span><strong>{totals.local}</strong> local</span>
+              <span><strong>{formatDuration(totalDurationMs)}</strong> total</span>
+            </div>
           </div>
-          <label className="checkbox-line">
-            <input type="checkbox" checked={favoritesOnly} onChange={(event) => setFavoritesOnly(event.target.checked)} />
-            Favorites only
-          </label>
+          <div className="library-header-controls">
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={favoritesOnly}
+                onChange={(event) => setFavoritesOnly(event.target.checked)}
+              />
+              Favorites only
+            </label>
+          </div>
         </section>
 
         <section className="track-list" aria-label="Tracks">
+          {tracks.length === 0 && (
+            <p className="track-list-empty">No tracks match. Adjust filters or queue an ingest.</p>
+          )}
           {tracks.map((track) => (
             <TrackRow
               key={track.id}
@@ -249,54 +364,114 @@ function App() {
         </section>
       </section>
 
-      <aside className={`sidebar right ${rightPanelOpen ? 'open' : 'closed'}`}>
-        <div className="panel-heading">
-          <h2>Visualizer</h2>
-          <Button icon={<Waves size={16} />} onClick={() => setFullscreen(true)}>
-            Full
-          </Button>
-        </div>
-        <div className="visualizer-card">{renderVisualizer()}</div>
-        <div className="segmented">
-          {(['bars', 'waveform', 'radial'] as VisualizerMode[]).map((mode) => (
-            <button disabled={mode === 'radial'} className={visualizerMode === mode ? 'selected' : ''} type="button" onClick={() => setVisualizerMode(mode)}>
-              {mode}
-            </button>
-          ))}
-        </div>
-        <section className="now-playing-detail">
-          <p>Selected</p>
-          <h2>{activeTrack?.title ?? 'No track'}</h2>
-          <span>{activeTrack?.artist ?? 'Choose a track to load the audio engine.'}</span>
-          {activeTrack?.styleDescription && <blockquote>{activeTrack.styleDescription}</blockquote>}
+      <aside
+        className={`sidebar right ${rightPanelOpen ? 'open' : 'closed'}`}
+        aria-label="Visualizer and now playing"
+      >
+        <section aria-labelledby="visualizer-heading">
+          <div className="rail-heading-block">
+            <h2 id="visualizer-heading">Visualizer</h2>
+            <Button icon={<Maximize2 size={14} />} variant="ghost" onClick={() => setFullscreen(true)}>
+              Full
+            </Button>
+          </div>
+          <div className="visualizer-card">{renderVisualizer()}</div>
+          <div className="segmented" role="tablist" aria-label="Visualizer mode">
+            {(['bars', 'waveform', 'radial'] as VisualizerMode[]).map((mode) => (
+              <button
+                key={mode}
+                role="tab"
+                aria-selected={visualizerMode === mode}
+                disabled={mode === 'radial'}
+                className={visualizerMode === mode ? 'selected' : ''}
+                type="button"
+                onClick={() => setVisualizerMode(mode)}
+              >
+                {mode === 'radial' ? 'radial · soon' : mode}
+              </button>
+            ))}
+          </div>
         </section>
-        <section className="queue-panel">
-          <h2>Ingest queue</h2>
-          {jobs.length === 0 && <p className="muted">No jobs yet.</p>}
+
+        <section className="now-playing-detail" aria-labelledby="selected-heading">
+          <div className="eyebrow">
+            <span id="selected-heading">Selected</span>
+            {activeTrack && <span>{formatDuration(activeTrack.durationMs)}</span>}
+          </div>
+          <h2>{activeTrack?.title ?? 'No track loaded'}</h2>
+          <p className="artist-line">
+            {activeTrack?.artist ?? 'Choose a track to load the audio engine.'}
+          </p>
+          {activeTrack?.styleDescription && (
+            <div className="style-quote">
+              <Sparkles size={15} />
+              <span>{activeTrack.styleDescription}</span>
+            </div>
+          )}
+        </section>
+
+        <section className="queue-panel" aria-labelledby="queue-heading">
+          <div className="rail-heading">
+            <h2 id="queue-heading">Ingest queue</h2>
+            <span className="rail-heading-count">{jobs.length}</span>
+          </div>
+          {jobs.length === 0 && <p className="queue-empty">No jobs yet — queue one with the Ingest button.</p>}
           {jobs.map((job) => (
             <div className="job" key={job.id}>
-              <span>{job.source}</span>
-              <strong>{job.status}</strong>
+              <span className="job-source">{job.source}</span>
+              <strong className="job-status" data-status={job.status}>
+                {job.status}
+              </strong>
               <ProgressBar value={job.progress} />
             </div>
           ))}
         </section>
       </aside>
 
-      <footer className="player-bar">
+      <footer className="player-bar" aria-label="Player">
         <div className="player-meta">
-          <div className="mini-cover">
-            <Disc3 size={19} />
+          <div className={`mini-cover ${playing ? 'playing' : ''}`} aria-hidden>
+            <Disc3 size={20} strokeWidth={2.2} />
           </div>
-          <div>
+          <div className="player-meta-text">
+            <span className="now">{playing ? 'Now playing' : 'Idle'}</span>
             <strong>{activeTrack?.title ?? 'No track loaded'}</strong>
-            <span>{activeTrack ? `${activeTrack.artist ?? 'Unknown'} - ${formatDuration(activeTrack.durationMs)}` : 'Pick a track'}</span>
+            <span>
+              {activeTrack
+                ? `${activeTrack.artist ?? 'Unknown'} · ${formatDuration(activeTrack.durationMs)}`
+                : 'Pick a track to load the engine'}
+            </span>
           </div>
         </div>
-        <Button icon={playing ? <Pause size={18} /> : <Play size={18} />} variant="primary" onClick={togglePlay}>
+        <Button
+          icon={playing ? <Pause size={18} /> : <Play size={18} />}
+          variant="primary"
+          onClick={togglePlay}
+          aria-label={playing ? 'Pause' : 'Play'}
+        >
           {playing ? 'Pause' : 'Play'}
         </Button>
-        <input className="volume" type="range" min="0" max="1" step="0.01" defaultValue="0.82" onChange={(event) => audioEngine.setVolume(Number(event.target.value))} />
+        <span className="topbar-divider" aria-hidden />
+        <label className="player-volume">
+          <span className="muted" style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', letterSpacing: '0.16em', textTransform: 'uppercase' }}>
+            VOL
+          </span>
+          <input
+            className="volume"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={volume}
+            style={{ ['--volume-pct' as string]: `${Math.round(volume * 100)}%` }}
+            onChange={(event) => {
+              const next = Number(event.target.value)
+              setVolume(next)
+              audioEngine.setVolume(next)
+            }}
+            aria-label="Volume"
+          />
+        </label>
       </footer>
 
       <IngestDialog
@@ -342,22 +517,31 @@ function IngestDialog({
     onDone()
   }
 
+  const sourceTitle =
+    source === 'suno' ? 'Suno import — advanced public URL mode' : source === 'youtube' ? 'YouTube import — rights confirmation required' : 'Local import'
+  const sourceCopy =
+    source === 'suno'
+      ? 'Public Suno URLs run in advanced mode. Style tags, prompt, lyrics, cover URL, and audio URL are preserved when metadata is available.'
+      : source === 'youtube'
+        ? 'Only import audio you own or have explicit rights to download. Polysong does not host or transmit copyrighted media on your behalf.'
+        : 'Local files stay under your controlled library folder. No network calls are made for this import.'
+
   return (
-    <Modal title="Ingest source" open={open} onClose={onClose}>
+    <Modal title="Queue an ingest" eyebrow="Ingest pipeline" open={open} onClose={onClose}>
       <div className="form-stack">
         <label>
           URL or local audio path
-          <input value={input} onChange={(event) => setInput(event.target.value)} />
+          <input
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="https://… or /Music/…"
+            spellCheck={false}
+            autoComplete="off"
+          />
         </label>
-        <div className="notice">
-          <strong>{source === 'suno' ? 'Suno import' : source === 'youtube' ? 'YouTube import' : 'Local import'}</strong>
-          <p>
-            {source === 'suno'
-              ? 'Public Suno URLs are advanced mode. Style tags, prompts, lyrics, cover URL, and audio URL are preserved when metadata is available.'
-              : source === 'youtube'
-                ? 'Only import videos you own or have the right to download.'
-                : 'Local files stay under your controlled library folder.'}
-          </p>
+        <div className="notice" data-tone={source === 'youtube' ? 'warn' : source === 'suno' ? 'advanced' : undefined}>
+          <strong>{sourceTitle}</strong>
+          <p>{sourceCopy}</p>
         </div>
         {source === 'youtube' && (
           <label className="checkbox-line">
@@ -379,9 +563,17 @@ function IngestDialog({
             Enable advanced public Suno URL mode for content I may import.
           </label>
         )}
-        <Button variant="primary" icon={<Upload size={17} />} disabled={needsYoutubeConsent || needsSunoConsent} onClick={submit}>
-          Queue ingest
-        </Button>
+        <div className="modal-footer">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            icon={<Upload size={16} />}
+            disabled={needsYoutubeConsent || needsSunoConsent}
+            onClick={submit}
+          >
+            Queue ingest
+          </Button>
+        </div>
       </div>
     </Modal>
   )
@@ -399,7 +591,7 @@ function SettingsDialog({
   onUpdate: (patch: Partial<AppSettings>) => Promise<void>
 }) {
   return (
-    <Modal title="Settings" open={open} onClose={onClose}>
+    <Modal title="Workspace settings" eyebrow="Polysong" open={open} onClose={onClose}>
       <div className="form-stack">
         <label>
           Theme
@@ -427,7 +619,17 @@ function SettingsDialog({
           />
           Suno public URL advanced mode
         </label>
-        <p className="muted">Audio root: {settings.audioRoot}. Sidecars and authenticated download workers are scaffolded as backend modules.</p>
+        <div className="notice">
+          <strong>Audio root</strong>
+          <p>
+            <code style={{ fontFamily: 'var(--font-mono)' }}>{settings.audioRoot}</code>. Sidecars and authenticated download workers are scaffolded as backend modules.
+          </p>
+        </div>
+        <div className="modal-footer">
+          <Button variant="primary" onClick={onClose}>
+            Done
+          </Button>
+        </div>
       </div>
     </Modal>
   )

@@ -20,37 +20,69 @@ export function TrackRow({
   onToggleExpanded: () => void
   onDelete: () => void
 }) {
+  const showStyleChip = Boolean(track.styleDescription)
+
   return (
-    <article className={`track-row ${active ? 'active' : ''}`}>
+    <article className={`track-row ${active ? 'active' : ''} ${expanded ? 'expanded' : ''}`}>
       <button className="cover-art" type="button" onClick={onPlay} aria-label={`Play ${track.title}`}>
-        <Music2 size={21} />
+        <Music2 size={20} strokeWidth={1.8} />
       </button>
+
       <div className="track-main">
-        <button className="track-title" type="button" onClick={onToggleExpanded}>
+        <button
+          className="track-title"
+          type="button"
+          onClick={onToggleExpanded}
+          aria-expanded={expanded}
+          aria-controls={`track-details-${track.id}`}
+        >
           <strong>{track.title}</strong>
-          <span>{track.artist ?? 'Unknown artist'}</span>
+          <span className="track-title-meta">
+            <span className="artist">{track.artist ?? 'Unknown artist'}</span>
+            <span className="duration">{formatDuration(track.durationMs)}</span>
+          </span>
         </button>
+
+        {showStyleChip && (
+          <span className="track-style" title={track.styleDescription ?? ''}>
+            <Sparkles size={12} />
+            <span className="track-style-text">{track.styleDescription}</span>
+          </span>
+        )}
+
         {expanded && (
-          <div className="track-details">
+          <dl className="track-details" id={`track-details-${track.id}`}>
             {track.styleDescription && (
-              <p>
-                <Sparkles size={14} /> <span>{track.styleDescription}</span>
-              </p>
+              <>
+                <dt>Style description</dt>
+                <dd>{track.styleDescription}</dd>
+              </>
             )}
-            {track.sunoPrompt && <p className="muted">Prompt: {track.sunoPrompt}</p>}
-            <p className="muted">{track.filePath}</p>
-          </div>
+            {track.sunoPrompt && (
+              <>
+                <dt>Suno prompt</dt>
+                <dd>{track.sunoPrompt}</dd>
+              </>
+            )}
+            <dt>File</dt>
+            <dd>
+              <code>{track.filePath}</code>
+            </dd>
+          </dl>
         )}
       </div>
+
       <span className={`source-pill source-${track.source}`}>{sourceLabel(track.source)}</span>
-      <span className="duration">{formatDuration(track.durationMs)}</span>
-      <Button icon={<Play size={16} />} aria-label="Play" onClick={onPlay} />
-      <Button
-        icon={<Heart size={16} fill={track.favorite ? 'currentColor' : 'none'} />}
-        aria-label={track.favorite ? 'Remove favorite' : 'Add favorite'}
-        onClick={onToggleFavorite}
-      />
-      <Button icon={<Trash2 size={16} />} variant="quiet" aria-label="Delete track" onClick={onDelete} />
+
+      <div className="track-actions">
+        <Button icon={<Play size={15} />} aria-label="Play" onClick={onPlay} />
+        <Button
+          icon={<Heart size={15} fill={track.favorite ? 'currentColor' : 'none'} />}
+          aria-label={track.favorite ? 'Remove favorite' : 'Add favorite'}
+          onClick={onToggleFavorite}
+        />
+        <Button icon={<Trash2 size={15} />} variant="quiet" aria-label="Delete track" onClick={onDelete} />
+      </div>
     </article>
   )
 }
