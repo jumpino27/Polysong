@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/polysong-core",
+  "crates/polysong-db",
+  "crates/polysong-ingest",
+  "crates/polysong-source-local",
+  "crates/polysong-source-suno",
+  "crates/polysong-source-youtube",
+  "src-tauri"
+]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+polysong-core = { path = "crates/polysong-core" }
+polysong-db = { path = "crates/polysong-db" }
+polysong-ingest = { path = "crates/polysong-ingest" }
+polysong-source-local = { path = "crates/polysong-source-local" }
+polysong-source-suno = { path = "crates/polysong-source-suno" }
+polysong-source-youtube = { path = "crates/polysong-source-youtube" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+

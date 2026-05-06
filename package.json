@@ -1,0 +1,16 @@
+{
+  "name": "polysong",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --dir frontend dev",
+    "build": "pnpm --dir frontend build",
+    "preview": "pnpm --dir frontend preview",
+    "tauri:dev": "pnpm --dir frontend tauri dev",
+    "tauri:build": "pnpm --dir frontend tauri build",
+    "check:rust": "cargo check --workspace"
+  },
+  "packageManager": "pnpm@10.0.0"
+}
+

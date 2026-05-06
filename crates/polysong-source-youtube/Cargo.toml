@@ -1,0 +1,9 @@
+[package]
+name = "polysong-source-youtube"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+polysong-core.workspace = true
+polysong-ingest.workspace = true
+url.workspace = true
