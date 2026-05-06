@@ -1,6 +1,7 @@
 import { Heart, Music2, Play, Sparkles, Trash2 } from 'lucide-react'
 import type { Track } from '../types'
 import { formatDuration, sourceLabel } from '../lib/format'
+import { mediaUrl } from '../lib/tauri'
 import { Button } from './Button'
 
 export function TrackRow({
@@ -21,11 +22,12 @@ export function TrackRow({
   onDelete: () => void
 }) {
   const showStyleChip = Boolean(track.styleDescription)
+  const coverUrl = mediaUrl(track.coverPath)
 
   return (
     <article className={`track-row ${active ? 'active' : ''} ${expanded ? 'expanded' : ''}`}>
       <button className="cover-art" type="button" onClick={onPlay} aria-label={`Play ${track.title}`}>
-        <Music2 size={20} strokeWidth={1.8} />
+        {coverUrl ? <img src={coverUrl} alt="" /> : <Music2 size={20} strokeWidth={1.8} />}
       </button>
 
       <div className="track-main">

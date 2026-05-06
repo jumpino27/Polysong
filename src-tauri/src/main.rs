@@ -7,9 +7,10 @@ use polysong_ingest::IngestRegistry;
 use polysong_source_local::LocalSource;
 use polysong_source_suno::SunoSource;
 use polysong_source_youtube::YoutubeSource;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
 struct AppState {
@@ -18,163 +19,304 @@ struct AppState {
     data_dir: PathBuf,
 }
 
-#[tauri::command]
-fn list_tracks(state: State<AppState>, filter: TrackFilter) -> Result<Vec<Track>, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .list_tracks(filter)
-        .map_err(to_string)
-}
+impl AppState {
+    fn open(data_dir: PathBuf) -> Result<Self, String> {
+        std::fs::create_dir_all(&data_dir).map_err(to_string)?;
+        for folder in ["suno", "youtube", "local", "covers"] {
+            std::fs::create_dir_all(data_dir.join("songs").join(folder)).map_err(to_string)?;
+        }
+        let db_path = data_dir.join("polysong.db");
+        let repo = Repository::open(db_path).map_err(to_string)?;
+        let registry = IngestRegistry::new()
+            .with_source(LocalSource)
+            .with_source(YoutubeSource)
+            .with_source(SunoSource);
+        Ok(Self {
+            repo: Mutex::new(repo),
+            registry,
+            data_dir,
+        })
+    }
 
-#[tauri::command]
-fn get_track(state: State<AppState>, id: TrackId) -> Result<Option<Track>, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .get_track(id)
-        .map_err(to_string)
-}
+    fn list_tracks(&self, filter: TrackFilter) -> Result<Vec<Track>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .list_tracks(filter)
+            .map_err(to_string)
+    }
 
-#[tauri::command]
-fn update_track_metadata(
-    state: State<AppState>,
-    id: TrackId,
-    patch: TrackPatch,
-) -> Result<(), String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .update_track_metadata(id, patch)
-        .map_err(to_string)
-}
+    fn get_track(&self, id: TrackId) -> Result<Option<Track>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .get_track(id)
+            .map_err(to_string)
+    }
 
-#[tauri::command]
-fn delete_track(state: State<AppState>, id: TrackId) -> Result<(), String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .delete_track(id)
-        .map_err(to_string)
-}
+    fn update_track_metadata(&self, id: TrackId, patch: TrackPatch) -> Result<(), String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .update_track_metadata(id, patch)
+            .map_err(to_string)
+    }
 
-#[tauri::command]
-fn ingest_url(state: State<AppState>, request: IngestRequest) -> Result<i64, String> {
-    let job_id = state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .queue_ingest(&request)
-        .map_err(to_string)?;
-    match state.registry.prepare(&request) {
-        Ok(candidates) => {
-            let mut first_track_id = None;
-            for mut candidate in candidates {
-                materialize_candidate(&state.data_dir, &mut candidate)?;
-                let track_id = state
+    fn delete_track(&self, id: TrackId) -> Result<(), String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .delete_track(id)
+            .map_err(to_string)
+    }
+
+    fn ingest_url(&self, request: IngestRequest) -> Result<i64, String> {
+        let job_id = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .queue_ingest(&request)
+            .map_err(to_string)?;
+        match self.registry.prepare(&request) {
+            Ok(candidates) => {
+                let result: Result<i64, String> = (|| {
+                    let mut first_track_id = None;
+                    for mut candidate in candidates {
+                        materialize_candidate(&self.data_dir, &mut candidate)?;
+                        let track_id = self
+                            .repo
+                            .lock()
+                            .map_err(lock_err)?
+                            .insert_candidate(candidate)
+                            .map_err(to_string)?;
+                        first_track_id.get_or_insert(track_id);
+                    }
+                    let repo = self.repo.lock().map_err(lock_err)?;
+                    repo.complete_job(job_id, first_track_id.unwrap_or_default())
+                        .map_err(to_string)?;
+                    Ok(job_id)
+                })();
+                if let Err(error) = &result {
+                    let _ = self
+                        .repo
+                        .lock()
+                        .map_err(lock_err)?
+                        .fail_job(job_id, error.as_str());
+                }
+                result
+            }
+            Err(error) => {
+                let _ = self
                     .repo
                     .lock()
                     .map_err(lock_err)?
-                    .insert_candidate(candidate)
-                    .map_err(to_string)?;
-                first_track_id.get_or_insert(track_id);
+                    .fail_job(job_id, &error.to_string());
+                Err(error.to_string())
             }
-            let repo = state.repo.lock().map_err(lock_err)?;
-            repo.complete_job(job_id, first_track_id.unwrap_or_default())
-                .map_err(to_string)?;
-            Ok(job_id)
         }
-        Err(error) => {
-            let _ = state
-                .repo
-                .lock()
-                .map_err(lock_err)?
-                .fail_job(job_id, &error.to_string());
-            Err(error.to_string())
+    }
+
+    fn list_ingest_jobs(&self) -> Result<Vec<IngestJob>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .list_ingest_jobs()
+            .map_err(to_string)
+    }
+
+    fn list_playlists(&self) -> Result<Vec<Playlist>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .list_playlists()
+            .map_err(to_string)
+    }
+
+    fn create_playlist(
+        &self,
+        name: String,
+        description: Option<String>,
+    ) -> Result<Playlist, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .create_playlist(&name, description)
+            .map_err(to_string)
+    }
+
+    fn get_settings(&self) -> Result<AppSettings, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .get_settings()
+            .map_err(to_string)
+    }
+
+    fn update_settings(&self, patch: SettingsPatch) -> Result<AppSettings, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .update_settings(patch)
+            .map_err(to_string)
+    }
+
+    fn upload_local(&self, filename: String, bytes: Vec<u8>) -> Result<i64, String> {
+        if bytes.len() < 1024 {
+            return Err("uploaded audio was too small".to_owned());
         }
+        let file_name = sanitize_filename(&filename)?;
+        let extension = Path::new(&file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .ok_or_else(|| "local upload must include an audio file extension".to_owned())?;
+        if !matches!(
+            extension.as_str(),
+            "mp3" | "m4a" | "flac" | "wav" | "ogg" | "opus"
+        ) {
+            return Err(format!("unsupported local audio extension: {extension}"));
+        }
+
+        let request = IngestRequest {
+            source: AudioSource::Local,
+            input: file_name.clone(),
+            advanced_public_suno: false,
+            consent_accepted: true,
+        };
+        let job_id = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .queue_ingest(&request)
+            .map_err(to_string)?;
+
+        let source_id = format!("{}", unix_ms());
+        let library_file = unique_local_file_path(&self.data_dir, &source_id, &file_name)?;
+        let destination = self
+            .data_dir
+            .join(library_file.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(to_string)?;
+        }
+        std::fs::write(&destination, bytes).map_err(to_string)?;
+
+        let mut candidate = IngestCandidate {
+            source: AudioSource::Local,
+            source_id: Some(source_id),
+            title: Path::new(&file_name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Local track")
+                .to_owned(),
+            artist: None,
+            album: None,
+            source_url: None,
+            original_input: Some(file_name),
+            file_path: library_file,
+            download_url: None,
+            cover_url: None,
+            cover_path: None,
+            duration_ms: None,
+            style_description: None,
+            suno_prompt: None,
+            lyrics: None,
+        };
+        enrich_local_metadata(&mut candidate, &destination, &self.data_dir);
+        let track_id = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .insert_candidate(candidate)
+            .map_err(to_string)?;
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .complete_job(job_id, track_id)
+            .map_err(to_string)?;
+        Ok(job_id)
     }
 }
 
 #[tauri::command]
-fn list_ingest_jobs(state: State<AppState>) -> Result<Vec<IngestJob>, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .list_ingest_jobs()
-        .map_err(to_string)
+fn list_tracks(state: State<Arc<AppState>>, filter: TrackFilter) -> Result<Vec<Track>, String> {
+    state.list_tracks(filter)
 }
 
 #[tauri::command]
-fn list_playlists(state: State<AppState>) -> Result<Vec<Playlist>, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .list_playlists()
-        .map_err(to_string)
+fn get_track(state: State<Arc<AppState>>, id: TrackId) -> Result<Option<Track>, String> {
+    state.get_track(id)
+}
+
+#[tauri::command]
+fn update_track_metadata(
+    state: State<Arc<AppState>>,
+    id: TrackId,
+    patch: TrackPatch,
+) -> Result<(), String> {
+    state.update_track_metadata(id, patch)
+}
+
+#[tauri::command]
+fn delete_track(state: State<Arc<AppState>>, id: TrackId) -> Result<(), String> {
+    state.delete_track(id)
+}
+
+#[tauri::command]
+fn ingest_url(state: State<Arc<AppState>>, request: IngestRequest) -> Result<i64, String> {
+    state.ingest_url(request)
+}
+
+#[tauri::command]
+fn list_ingest_jobs(state: State<Arc<AppState>>) -> Result<Vec<IngestJob>, String> {
+    state.list_ingest_jobs()
+}
+
+#[tauri::command]
+fn list_playlists(state: State<Arc<AppState>>) -> Result<Vec<Playlist>, String> {
+    state.list_playlists()
 }
 
 #[tauri::command]
 fn create_playlist(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     name: String,
     description: Option<String>,
 ) -> Result<Playlist, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .create_playlist(&name, description)
-        .map_err(to_string)
+    state.create_playlist(name, description)
 }
 
 #[tauri::command]
-fn get_settings(state: State<AppState>) -> Result<AppSettings, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .get_settings()
-        .map_err(to_string)
+fn get_settings(state: State<Arc<AppState>>) -> Result<AppSettings, String> {
+    state.get_settings()
 }
 
 #[tauri::command]
-fn update_settings(state: State<AppState>, patch: SettingsPatch) -> Result<AppSettings, String> {
-    state
-        .repo
-        .lock()
-        .map_err(lock_err)?
-        .update_settings(patch)
-        .map_err(to_string)
+fn update_settings(
+    state: State<Arc<AppState>>,
+    patch: SettingsPatch,
+) -> Result<AppSettings, String> {
+    state.update_settings(patch)
 }
 
 fn main() {
     tracing_subscriber::fmt().init();
 
+    if std::env::args().any(|arg| arg == "--backend-server") {
+        run_http_backend().expect("failed to run Polysong backend server");
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            for folder in ["suno", "youtube", "local", "covers"] {
-                std::fs::create_dir_all(data_dir.join("songs").join(folder))?;
-            }
-            let db_path = data_dir.join("polysong.db");
-            let repo = Repository::open(db_path)?;
-            let registry = IngestRegistry::new()
-                .with_source(LocalSource)
-                .with_source(YoutubeSource)
-                .with_source(SunoSource);
-            app.manage(AppState {
-                repo: Mutex::new(repo),
-                registry,
-                data_dir,
-            });
+            let data_dir = polysong_data_dir()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            let state = Arc::new(
+                AppState::open(data_dir)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
+            );
+            start_http_backend(state.clone());
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -199,6 +341,347 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> String {
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn run_http_backend() -> Result<(), String> {
+    let data_dir = polysong_data_dir()?;
+    let backend = Arc::new(AppState::open(data_dir)?);
+    serve_http_backend(backend)
+}
+
+fn start_http_backend(backend: Arc<AppState>) {
+    std::thread::spawn(move || {
+        if let Err(error) = serve_http_backend(backend) {
+            eprintln!("Polysong HTTP backend not started: {error}");
+        }
+    });
+}
+
+fn serve_http_backend(backend: Arc<AppState>) -> Result<(), String> {
+    let server = tiny_http::Server::http("127.0.0.1:4777").map_err(to_string)?;
+    println!(
+        "Polysong backend listening on http://127.0.0.1:4777 with data at {}",
+        backend.data_dir.display()
+    );
+
+    for mut request in server.incoming_requests() {
+        let response = handle_http_request(&backend, &mut request);
+        let _ = request.respond(response);
+    }
+    Ok(())
+}
+
+fn handle_http_request(
+    backend: &AppState,
+    request: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    if request.method() == &tiny_http::Method::Options {
+        return http_response(204, Vec::<u8>::new(), "text/plain");
+    }
+
+    if request.method() == &tiny_http::Method::Get && request.url().starts_with("/media/") {
+        return media_response(backend, request.url());
+    }
+
+    let result = match (request.method(), request.url()) {
+        (&tiny_http::Method::Post, "/api/list_tracks") => parse_body::<ListTracksBody>(request)
+            .and_then(|body| to_json(backend.list_tracks(body.filter))),
+        (&tiny_http::Method::Post, "/api/get_track") => {
+            parse_body::<IdBody>(request).and_then(|body| to_json(backend.get_track(body.id)))
+        }
+        (&tiny_http::Method::Post, "/api/update_track_metadata") => {
+            parse_body::<UpdateTrackBody>(request)
+                .and_then(|body| to_json(backend.update_track_metadata(body.id, body.patch)))
+        }
+        (&tiny_http::Method::Post, "/api/delete_track") => {
+            parse_body::<IdBody>(request).and_then(|body| to_json(backend.delete_track(body.id)))
+        }
+        (&tiny_http::Method::Post, "/api/ingest_url") => parse_body::<IngestRequestBody>(request)
+            .and_then(|body| to_json(backend.ingest_url(body.request))),
+        (&tiny_http::Method::Post, path) if path.starts_with("/api/upload_local") => {
+            let filename = query_value(path, "filename")
+                .and_then(percent_decode)
+                .ok_or_else(|| "upload_local requires a filename query parameter".to_owned());
+            filename
+                .and_then(|filename| read_body_bytes(request).map(|bytes| (filename, bytes)))
+                .and_then(|(filename, bytes)| to_json(backend.upload_local(filename, bytes)))
+        }
+        (&tiny_http::Method::Post, "/api/list_ingest_jobs") => to_json(backend.list_ingest_jobs()),
+        (&tiny_http::Method::Post, "/api/list_playlists") => to_json(backend.list_playlists()),
+        (&tiny_http::Method::Post, "/api/create_playlist") => {
+            parse_body::<CreatePlaylistBody>(request)
+                .and_then(|body| to_json(backend.create_playlist(body.name, body.description)))
+        }
+        (&tiny_http::Method::Post, "/api/get_settings") => to_json(backend.get_settings()),
+        (&tiny_http::Method::Post, "/api/update_settings") => {
+            parse_body::<UpdateSettingsBody>(request)
+                .and_then(|body| to_json(backend.update_settings(body.patch)))
+        }
+        _ => Err(format!(
+            "unknown route: {} {}",
+            request.method(),
+            request.url()
+        )),
+    };
+
+    match result {
+        Ok(body) => http_response(200, body, "application/json"),
+        Err(error) => {
+            let body = serde_json::json!({ "error": error })
+                .to_string()
+                .into_bytes();
+            http_response(500, body, "application/json")
+        }
+    }
+}
+
+fn parse_body<T: for<'de> Deserialize<'de>>(request: &mut tiny_http::Request) -> Result<T, String> {
+    let mut body = String::new();
+    request
+        .as_reader()
+        .read_to_string(&mut body)
+        .map_err(to_string)?;
+    serde_json::from_str(&body).map_err(to_string)
+}
+
+fn read_body_bytes(request: &mut tiny_http::Request) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    request
+        .as_reader()
+        .read_to_end(&mut body)
+        .map_err(to_string)?;
+    Ok(body)
+}
+
+fn to_json<T: serde::Serialize>(result: Result<T, String>) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&result?).map_err(to_string)
+}
+
+fn media_response(backend: &AppState, url: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let Some(encoded_path) = url.strip_prefix("/media/") else {
+        return http_response(404, b"not found".to_vec(), "text/plain");
+    };
+    let Some(relative_path) = percent_decode(encoded_path) else {
+        return http_response(400, b"invalid media path".to_vec(), "text/plain");
+    };
+    let Ok(path) = safe_data_path(&backend.data_dir, &relative_path) else {
+        return http_response(403, b"invalid media path".to_vec(), "text/plain");
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return http_response(404, b"media not found".to_vec(), "text/plain");
+    };
+    http_response(200, bytes, media_content_type(&path))
+}
+
+fn http_response(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let mut response = tiny_http::Response::from_data(body).with_status_code(status);
+    for (name, value) in [
+        ("Content-Type", content_type),
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+        ("Access-Control-Allow-Headers", "content-type"),
+        ("Access-Control-Allow-Private-Network", "true"),
+    ] {
+        response.add_header(
+            tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+                .expect("valid HTTP header"),
+        );
+    }
+    response
+}
+
+fn polysong_data_dir() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("POLYSONG_DATA_DIR").map(PathBuf::from) {
+        return Ok(path);
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        if current_dir.join("package.json").exists() && current_dir.join("src-tauri").is_dir() {
+            return Ok(current_dir);
+        }
+    }
+
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .ok_or_else(|| "APPDATA is not set".to_owned())?
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_owned())?)
+            .join("Library")
+            .join("Application Support")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "Neither XDG_DATA_HOME nor HOME is set".to_owned())?
+    };
+    Ok(base.join("polysong"))
+}
+
+fn safe_data_path(data_dir: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(relative_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("path must stay inside the Polysong data directory".to_owned());
+    }
+
+    let root = data_dir.canonicalize().map_err(to_string)?;
+    let target = data_dir
+        .join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+        .canonicalize()
+        .map_err(to_string)?;
+    if !target.starts_with(root) {
+        return Err("path must stay inside the Polysong data directory".to_owned());
+    }
+    Ok(target)
+}
+
+fn query_value<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let query = url.split_once('?')?.1;
+    query.split('&').find_map(|part| {
+        let (part_key, value) = part.split_once('=')?;
+        (part_key == key).then_some(value)
+    })
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                output.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn sanitize_filename(filename: &str) -> Result<String, String> {
+    let file_name = Path::new(filename)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "file name is required".to_owned())?;
+    let cleaned: String = file_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-').to_owned();
+    if cleaned.is_empty() {
+        Err("file name is required".to_owned())
+    } else {
+        Ok(cleaned)
+    }
+}
+
+fn unique_local_file_path(
+    data_dir: &Path,
+    source_id: &str,
+    file_name: &str,
+) -> Result<String, String> {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "file extension is required".to_owned())?;
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("local-track");
+    let mut rel = format!("songs/local/{stem}-{source_id}.{extension}");
+    let mut counter = 2;
+    while data_dir
+        .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+        .exists()
+    {
+        rel = format!("songs/local/{stem}-{source_id}-{counter}.{extension}");
+        counter += 1;
+    }
+    Ok(rel)
+}
+
+fn media_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("ogg") | Some("opus") => "audio/ogg",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct ListTracksBody {
+    filter: TrackFilter,
+}
+
+#[derive(Deserialize)]
+struct IdBody {
+    id: TrackId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateTrackBody {
+    id: TrackId,
+    patch: TrackPatch,
+}
+
+#[derive(Deserialize)]
+struct IngestRequestBody {
+    request: IngestRequest,
+}
+
+#[derive(Deserialize)]
+struct CreatePlaylistBody {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateSettingsBody {
+    patch: SettingsPatch,
 }
 
 fn materialize_candidate(data_dir: &Path, candidate: &mut IngestCandidate) -> Result<(), String> {

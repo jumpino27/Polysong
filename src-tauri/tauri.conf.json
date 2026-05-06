@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.jumpino.polysong",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../frontend dev",
+    "beforeDevCommand": "pnpm -C frontend dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm --dir ../frontend build",
+    "beforeBuildCommand": "pnpm -C frontend build",
     "frontendDist": "../frontend/dist"
   },
   "app": {
@@ -20,13 +20,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: polysong:; media-src 'self' asset: http://asset.localhost data: polysong:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:4777; img-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 data: polysong:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 data: polysong:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "icon": ["icons/icon.ico"],
     "externalBin": []
   }
 }
-

@@ -542,13 +542,14 @@ p {
    ========================================================================= */
 
 .track-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
   padding: 4px 0;
 }
 
 .track-list-empty {
+  grid-column: 1 / -1;
   padding: 48px 16px;
   text-align: center;
   color: var(--muted);
@@ -559,15 +560,18 @@ p {
 
 .track-row {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr) auto auto;
-  gap: 14px;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px solid transparent;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: transparent;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--bg-elev-1) 92%, transparent), var(--bg-sunken));
   position: relative;
+  overflow: hidden;
   transition:
+    transform var(--dur-fast) var(--ease-out),
     background var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out);
 }
@@ -583,7 +587,7 @@ p {
 }
 
 .track-row:hover {
-  background: var(--bg-elev-1);
+  transform: translateY(-1px);
   border-color: var(--line);
 }
 
@@ -599,8 +603,8 @@ p {
 .cover-art {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -610,6 +614,14 @@ p {
   color: var(--text);
   cursor: pointer;
   transition: transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  overflow: hidden;
+}
+
+.cover-art img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .cover-art:hover {
@@ -710,10 +722,11 @@ p {
 }
 
 .track-row.expanded .track-style-text {
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .track-details {
+  grid-column: 1 / -1;
   display: grid;
   gap: 6px;
   margin-top: 8px;
@@ -724,6 +737,9 @@ p {
   font-size: 12.5px;
   color: var(--text-soft);
   animation: expand-in var(--dur-med) var(--ease-out);
+  max-height: 240px;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .track-details dt {
@@ -738,6 +754,9 @@ p {
 .track-details dd {
   margin: 0 0 8px;
   color: var(--text);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .track-details dd:last-child {
@@ -763,8 +782,10 @@ p {
 }
 
 .source-pill {
+  grid-column: 1 / 2;
   display: inline-flex;
   align-items: center;
+  justify-self: start;
   gap: 5px;
   padding: 3px 8px;
   border-radius: var(--r-xs);
@@ -805,6 +826,8 @@ p {
 }
 
 .track-actions {
+  grid-column: 2 / 3;
+  justify-self: end;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1314,6 +1337,63 @@ p {
   gap: 16px;
 }
 
+.ingest-source-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ingest-source-picker button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.ingest-source-picker button:hover,
+.ingest-source-picker button.selected {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-sunken));
+  color: var(--text);
+}
+
+.file-drop {
+  position: relative;
+  min-height: 76px;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 10px !important;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-sunken));
+  color: var(--text) !important;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.file-drop input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .form-stack label {
   display: grid;
   gap: 6px;
@@ -1322,6 +1402,10 @@ p {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.url-field.hidden {
+  display: none;
 }
 
 .form-stack label > input,

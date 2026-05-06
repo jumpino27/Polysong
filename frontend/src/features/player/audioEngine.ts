@@ -1,4 +1,5 @@
 import type { Track } from '../../types'
+import { mediaUrl } from '../../lib/tauri'
 
 type EngineListener = () => void
 
@@ -88,11 +89,7 @@ class AudioEngine {
   }
 
   private resolveSource(track: Track) {
-    if ((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
-      return `polysong://track/${track.id}`
-    }
-
-    return 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA='
+    return mediaUrl(track.filePath) ?? ''
   }
 
   private setPlaying(value: boolean) {

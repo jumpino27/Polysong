@@ -24,6 +24,7 @@ import {
   Disc3,
   Eye,
   EyeOff,
+  FileAudio,
   ListMusic,
   Maximize2,
   Minimize2,
@@ -48,8 +49,7 @@ import { WaveformVisualizer } from './features/visualizer/WaveformVisualizer'
 import { audioEngine } from './features/player/audioEngine'
 import { formatDuration } from './lib/format'
 import { api } from './lib/tauri'
-import { inferSource } from './lib/mock'
-import type { AppSettings, AudioSource, IngestJob, Playlist, Track, VisualizerMode } from './types'
+import type { AppSettings, AudioSource, IngestJob, Playlist, Track, TrackFilter, VisualizerMode } from './types'
 
 const defaultSettings: AppSettings = {
   theme: 'dark',
@@ -63,6 +63,7 @@ const SOURCES: ReadonlyArray<AudioSource | 'all'> = ['all', 'suno', 'youtube', '
 
 function App() {
   const [tracks, setTracks] = useState<Track[]>([])
+  const [libraryTracks, setLibraryTracks] = useState<Track[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [jobs, setJobs] = useState<IngestJob[]>([])
   const [settings, setSettings] = useState<AppSettings>(defaultSettings)
@@ -82,18 +83,25 @@ function App() {
   const [volume, setVolume] = useState(0.82)
 
   const refresh = useCallback(async () => {
-    const filter = {
+    const filter: TrackFilter = {
       source: source === 'all' ? null : source,
       search: search || null,
       favoritesOnly,
     }
-    const [nextTracks, nextPlaylists, nextJobs, nextSettings] = await Promise.all([
+    const libraryFilter: TrackFilter = {
+      source: null,
+      search: search || null,
+      favoritesOnly,
+    }
+    const [nextTracks, nextLibraryTracks, nextPlaylists, nextJobs, nextSettings] = await Promise.all([
       api.listTracks(filter),
+      api.listTracks(libraryFilter),
       api.listPlaylists(),
       api.listIngestJobs(),
       api.getSettings(),
     ])
     setTracks(nextTracks)
+    setLibraryTracks(nextLibraryTracks)
     setPlaylists(nextPlaylists)
     setJobs(nextJobs)
     setSettings(nextSettings)
@@ -133,16 +141,16 @@ function App() {
 
   const totals = useMemo(
     () => ({
-      suno: tracks.filter((track) => track.source === 'suno').length,
-      youtube: tracks.filter((track) => track.source === 'youtube').length,
-      local: tracks.filter((track) => track.source === 'local').length,
+      suno: libraryTracks.filter((track) => track.source === 'suno').length,
+      youtube: libraryTracks.filter((track) => track.source === 'youtube').length,
+      local: libraryTracks.filter((track) => track.source === 'local').length,
     }),
-    [tracks],
+    [libraryTracks],
   )
 
   const totalDurationMs = useMemo(
-    () => tracks.reduce((sum, track) => sum + (track.durationMs ?? 0), 0),
-    [tracks],
+    () => libraryTracks.reduce((sum, track) => sum + (track.durationMs ?? 0), 0),
+    [libraryTracks],
   )
 
   const selectAndPlay = async (track: Track) => {
@@ -248,7 +256,7 @@ function App() {
               >
                 <span className="src-dot" aria-hidden />
                 <span className="src-label">{value === 'all' ? 'All sources' : value}</span>
-                <span className="src-count">{value === 'all' ? tracks.length : totals[value]}</span>
+                <span className="src-count">{value === 'all' ? libraryTracks.length : totals[value]}</span>
               </button>
             ))}
           </nav>
@@ -326,7 +334,7 @@ function App() {
               Tracks from local files, YouTube, and Suno in <em>one queue</em>.
             </h1>
             <div className="library-header-meta">
-              <span><strong>{tracks.length}</strong> tracks</span>
+              <span><strong>{libraryTracks.length}</strong> tracks</span>
               <span><strong>{totals.suno}</strong> Suno</span>
               <span><strong>{totals.youtube}</strong> YouTube</span>
               <span><strong>{totals.local}</strong> local</span>
@@ -502,12 +510,21 @@ function IngestDialog({
   onSettings: (patch: Partial<AppSettings>) => Promise<void>
   onDone: () => void
 }) {
+  const [source, setSource] = useState<AudioSource>('suno')
   const [input, setInput] = useState('https://suno.com/s/x05KvNFq7Tn5KqyR')
-  const source = inferSource(input)
+  const [file, setFile] = useState<File | null>(null)
   const needsYoutubeConsent = source === 'youtube' && !settings.youtubeConsent
   const needsSunoConsent = source === 'suno' && !settings.sunoAdvancedEnabled
+  const cannotSubmit = source === 'local' ? !file : !input.trim() || needsYoutubeConsent || needsSunoConsent
 
   const submit = async () => {
+    if (source === 'local') {
+      if (!file) return
+      await api.uploadLocal(file)
+      onDone()
+      return
+    }
+
     await api.ingestUrl({
       source,
       input,
@@ -521,16 +538,44 @@ function IngestDialog({
     source === 'suno' ? 'Suno import — advanced public URL mode' : source === 'youtube' ? 'YouTube import — rights confirmation required' : 'Local import'
   const sourceCopy =
     source === 'suno'
-      ? 'Public Suno URLs run in advanced mode. Style tags, prompt, lyrics, cover URL, and audio URL are preserved when metadata is available.'
+      ? 'Paste a Suno song, short link, or playlist. Playlist imports expand into one downloaded track per clip with style, prompt, cover, and duration metadata when available.'
       : source === 'youtube'
         ? 'Only import audio you own or have explicit rights to download. Polysong does not host or transmit copyrighted media on your behalf.'
-        : 'Local files stay under your controlled library folder. No network calls are made for this import.'
+        : 'Choose an audio file from this machine. The backend copies it into songs/local and extracts embedded metadata and cover art when ffmpeg is available.'
 
   return (
     <Modal title="Queue an ingest" eyebrow="Ingest pipeline" open={open} onClose={onClose}>
       <div className="form-stack">
-        <label>
-          URL or local audio path
+        <div className="ingest-source-picker" role="tablist" aria-label="Ingest source">
+          {(['local', 'youtube', 'suno'] as AudioSource[]).map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={source === value}
+              className={source === value ? 'selected' : ''}
+              onClick={() => setSource(value)}
+            >
+              {value === 'local' && <FileAudio size={15} />}
+              {value === 'youtube' && <Play size={15} />}
+              {value === 'suno' && <Sparkles size={15} />}
+              <span>{value === 'local' ? 'Upload' : value}</span>
+            </button>
+          ))}
+        </div>
+        {source === 'local' && (
+          <label className="file-drop">
+            <FileAudio size={18} />
+            <span>{file ? file.name : 'Choose local audio'}</span>
+            <input
+              type="file"
+              accept="audio/*,.mp3,.m4a,.flac,.wav,.ogg,.opus"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
+          </label>
+        )}
+        <label className={source === 'local' ? 'url-field hidden' : 'url-field'}>
+          {source === 'suno' ? 'Suno song or playlist URL' : source === 'youtube' ? 'YouTube URL' : 'Optional local note'}
           <input
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -568,10 +613,10 @@ function IngestDialog({
           <Button
             variant="primary"
             icon={<Upload size={16} />}
-            disabled={needsYoutubeConsent || needsSunoConsent}
+            disabled={cannotSubmit}
             onClick={submit}
           >
-            Queue ingest
+            {source === 'local' ? 'Upload track' : 'Queue ingest'}
           </Button>
         </div>
       </div>

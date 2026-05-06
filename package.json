@@ -4,13 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "pnpm --dir frontend dev",
-    "build": "pnpm --dir frontend build",
-    "preview": "pnpm --dir frontend preview",
-    "tauri:dev": "pnpm --dir frontend tauri dev",
-    "tauri:build": "pnpm --dir frontend tauri build",
+    "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:frontend": "pnpm -C frontend dev",
+    "dev:backend": "cargo run --package polysong-app -- --backend-server",
+    "build": "pnpm -C frontend build",
+    "preview": "pnpm -C frontend preview",
+    "tauri:dev": "frontend\\node_modules\\.bin\\tauri.cmd dev",
+    "tauri:build": "frontend\\node_modules\\.bin\\tauri.cmd build",
     "check:rust": "cargo check --workspace"
   },
   "packageManager": "pnpm@10.0.0"
 }
-
