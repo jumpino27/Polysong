@@ -380,7 +380,7 @@ fn handle_http_request(
     }
 
     if request.method() == &tiny_http::Method::Get && request.url().starts_with("/media/") {
-        return media_response(backend, request.url());
+        return media_response(backend, request);
     }
 
     let result = match (request.method(), request.url()) {
@@ -457,7 +457,11 @@ fn to_json<T: serde::Serialize>(result: Result<T, String>) -> Result<Vec<u8>, St
     serde_json::to_vec(&result?).map_err(to_string)
 }
 
-fn media_response(backend: &AppState, url: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+fn media_response(
+    backend: &AppState,
+    request: &tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let url = request.url();
     let Some(encoded_path) = url.strip_prefix("/media/") else {
         return http_response(404, b"not found".to_vec(), "text/plain");
     };
@@ -470,7 +474,117 @@ fn media_response(backend: &AppState, url: &str) -> tiny_http::Response<std::io:
     let Ok(bytes) = std::fs::read(&path) else {
         return http_response(404, b"media not found".to_vec(), "text/plain");
     };
-    http_response(200, bytes, media_content_type(&path))
+    let total = bytes.len() as u64;
+    let content_type = media_content_type(&path);
+
+    // Parse Range header. Without Range support, browsers either silently
+    // refuse to seek past the buffered window or refetch from byte 0 on
+    // seek — which makes the scrubber appear to "restart" the song.
+    // Returning 206 with the requested byte slice lets the audio element
+    // seek anywhere in the file.
+    let range_header = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string());
+
+    if let Some(value) = range_header {
+        if let Some((start, end)) = parse_byte_range(&value, total) {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            let mut response = tiny_http::Response::from_data(slice).with_status_code(206);
+            for (name, val) in [
+                ("Content-Type", content_type.to_string()),
+                (
+                    "Content-Range",
+                    format!("bytes {}-{}/{}", start, end, total),
+                ),
+                ("Accept-Ranges", "bytes".to_string()),
+                ("Access-Control-Allow-Origin", "*".to_string()),
+                (
+                    "Access-Control-Allow-Methods",
+                    "GET, POST, OPTIONS".to_string(),
+                ),
+                (
+                    "Access-Control-Allow-Headers",
+                    "content-type, range".to_string(),
+                ),
+                (
+                    "Access-Control-Expose-Headers",
+                    "content-range, accept-ranges, content-length".to_string(),
+                ),
+                ("Cache-Control", "no-store".to_string()),
+            ] {
+                if let Ok(header) =
+                    tiny_http::Header::from_bytes(name.as_bytes(), val.as_bytes())
+                {
+                    response.add_header(header);
+                }
+            }
+            return response;
+        }
+    }
+
+    // No Range header — return the whole file but advertise Accept-Ranges
+    // so subsequent seeks issue Range requests instead of refetching from 0.
+    let mut response = tiny_http::Response::from_data(bytes).with_status_code(200);
+    for (name, val) in [
+        ("Content-Type", content_type.to_string()),
+        ("Accept-Ranges", "bytes".to_string()),
+        ("Access-Control-Allow-Origin", "*".to_string()),
+        (
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS".to_string(),
+        ),
+        (
+            "Access-Control-Allow-Headers",
+            "content-type, range".to_string(),
+        ),
+        (
+            "Access-Control-Expose-Headers",
+            "content-range, accept-ranges, content-length".to_string(),
+        ),
+        ("Cache-Control", "no-store".to_string()),
+    ] {
+        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), val.as_bytes()) {
+            response.add_header(header);
+        }
+    }
+    response
+}
+
+/// Parse a byte-range spec like `bytes=START-END`, `bytes=START-`, or
+/// `bytes=-N` (suffix). Single ranges only — multipart ranges are not
+/// supported here. Returns inclusive (start, end) bounded to `[0, total - 1]`.
+fn parse_byte_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    let (start_str, end_str) = spec.split_once('-')?;
+    if total == 0 {
+        return None;
+    }
+    let last = total - 1;
+
+    if start_str.is_empty() {
+        let suffix: u64 = end_str.trim().parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let suffix = suffix.min(total);
+        return Some((total - suffix, last));
+    }
+
+    let start: u64 = start_str.trim().parse().ok()?;
+    if start > last {
+        return None;
+    }
+    let end = if end_str.trim().is_empty() {
+        last
+    } else {
+        end_str.trim().parse::<u64>().ok()?.min(last)
+    };
+    if end < start {
+        return None;
+    }
+    Some((start, end))
 }
 
 fn http_response(

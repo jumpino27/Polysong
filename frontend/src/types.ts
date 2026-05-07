@@ -1,7 +1,7 @@
 export type AudioSource = 'local' | 'youtube' | 'suno'
 export type IngestStatus = 'queued' | 'downloading' | 'ready' | 'failed' | 'cancelled'
 export type ThemeMode = 'dark' | 'light' | 'system'
-export type VisualizerMode = 'bars' | 'waveform' | 'radial'
+export type VisualizerMode = 'cover' | 'bars' | 'waveform'
 
 export interface Track {
   id: number

@@ -1,54 +1,57 @@
 /**
  * Polysong — local-first music workstation.
  *
- * Composition. The shell is a three-column workstation grid: a slim left rail
- * with the Polysong wordmark, source filters with live counts, and a playlist
- * tray; a center workspace whose sticky toolbar carries panel toggles, search,
- * the ingest action, theme, and settings; a right rail that opens with a live
- * audio visualizer card, a segmented mode picker, a "Selected" detail block
- * that surfaces Suno style descriptions as a quoted callout, and the ingest
- * job queue. A full-width player bar pins to the bottom across all three
- * columns. The library header announces the page with a single h1 — "Tracks
- * from local files, YouTube, and Suno in one queue." Below it sits a dense,
- * tactile track list whose Suno rows wear their style description as a first-
- * class chip. Both side rails collapse via animated grid-column transitions
- * so closed panels do not leave empty gutters. Fullscreen mode swaps the
- * entire shell for an edge-to-edge visualizer overlay whose controls fade
- * after a brief idle and reappear on mouse movement.
+ * Composition. Three-column workstation grid: a left rail with sources and
+ * playlists; a center workspace with a sticky toolbar, library header, and
+ * dense single-column track list; a right rail focused on Now Playing — a
+ * compact selected-track header with a "Full visualizer" button, plus a tall
+ * queue list that fills the rail. The bass-reactive cover visualizer lives in
+ * fullscreen mode, where its overlay (eyebrow, mode picker, title, controls)
+ * sits in absolute top/bottom strips with gradient backdrops, leaving the
+ * center clear so the visualizer dominates. When idle, the overlay fades and
+ * only the cover + bars remain.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
   ChevronLeft,
   ChevronRight,
   Disc3,
-  Eye,
-  EyeOff,
   FileAudio,
   ListMusic,
+  Loader2,
   Maximize2,
   Minimize2,
   Moon,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Plus,
+  Repeat,
+  Repeat1,
   Search,
   Settings,
+  Shuffle,
+  SkipBack,
+  SkipForward,
   Sparkles,
   Sun,
   Upload,
-  X,
+  Volume2,
+  VolumeX,
 } from 'lucide-react'
 import './App.css'
 import { Button } from './components/Button'
 import { Modal } from './components/Modal'
-import { ProgressBar } from './components/ProgressBar'
+import { Select } from './components/Select'
 import { TrackRow } from './components/TrackRow'
 import { BarsVisualizer } from './features/visualizer/BarsVisualizer'
 import { WaveformVisualizer } from './features/visualizer/WaveformVisualizer'
-import { audioEngine } from './features/player/audioEngine'
-import { formatDuration } from './lib/format'
-import { api } from './lib/tauri'
+import { CoverVisualizer } from './features/visualizer/CoverVisualizer'
+import { audioEngine, type RepeatMode } from './features/player/audioEngine'
+import { formatDuration, formatTime, sourceLabel } from './lib/format'
+import { api, mediaUrl } from './lib/tauri'
 import type { AppSettings, AudioSource, IngestJob, Playlist, Track, TrackFilter, VisualizerMode } from './types'
 
 const defaultSettings: AppSettings = {
@@ -60,27 +63,52 @@ const defaultSettings: AppSettings = {
 }
 
 const SOURCES: ReadonlyArray<AudioSource | 'all'> = ['all', 'suno', 'youtube', 'local']
+const VISUALIZER_MODES: ReadonlyArray<VisualizerMode> = ['cover', 'bars', 'waveform']
+
+type PlaybackScope =
+  | { kind: 'all' }
+  | { kind: 'source'; source: AudioSource }
+  | { kind: 'playlist'; id: number; name: string }
+
+function scopeLabel(scope: PlaybackScope): string {
+  if (scope.kind === 'all') return 'All sources'
+  if (scope.kind === 'source') return sourceLabel(scope.source)
+  return `Playlist · ${scope.name}`
+}
 
 function App() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [libraryTracks, setLibraryTracks] = useState<Track[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
-  const [jobs, setJobs] = useState<IngestJob[]>([])
+  const [activeJobs, setActiveJobs] = useState<IngestJob[]>([])
   const [settings, setSettings] = useState<AppSettings>(defaultSettings)
   const [source, setSource] = useState<AudioSource | 'all'>('all')
   const [search, setSearch] = useState('')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [activeTrack, setActiveTrack] = useState<Track | null>(null)
-  const [expandedTrack, setExpandedTrack] = useState<number | null>(1)
+  const [expandedTrack, setExpandedTrack] = useState<number | null>(null)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
   const [ingestOpen, setIngestOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('bars')
+  const [createPlaylistOpen, setCreatePlaylistOpen] = useState(false)
+  const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('cover')
   const [fullscreen, setFullscreen] = useState(false)
   const [overlayVisible, setOverlayVisible] = useState(true)
   const [playing, setPlaying] = useState(false)
-  const [volume, setVolume] = useState(0.82)
+  const [volume, setVolume] = useState(audioEngine.volume)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [hasPrev, setHasPrev] = useState(false)
+  const [hasNext, setHasNext] = useState(false)
+  const [scrubValue, setScrubValue] = useState<number | null>(null)
+  const [shuffle, setShuffle] = useState(audioEngine.shuffleEnabled)
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>(audioEngine.repeatMode)
+  const [queueScope, setQueueScope] = useState<PlaybackScope | null>(null)
+  const [queueTracks, setQueueTracks] = useState<Track[]>([])
+  const [activePlaylistId, setActivePlaylistId] = useState<number | null>(null)
+
+  const seekingRef = useRef(false)
 
   const refresh = useCallback(async () => {
     const filter: TrackFilter = {
@@ -90,8 +118,8 @@ function App() {
     }
     const libraryFilter: TrackFilter = {
       source: null,
-      search: search || null,
-      favoritesOnly,
+      search: null,
+      favoritesOnly: false,
     }
     const [nextTracks, nextLibraryTracks, nextPlaylists, nextJobs, nextSettings] = await Promise.all([
       api.listTracks(filter),
@@ -100,12 +128,27 @@ function App() {
       api.listIngestJobs(),
       api.getSettings(),
     ])
-    setTracks(nextTracks)
+
+    const filtered = nextTracks.filter((track) => {
+      if (filter.source && track.source !== filter.source) return false
+      if (filter.favoritesOnly && !track.favorite) return false
+      if (filter.search) {
+        const needle = filter.search.toLowerCase()
+        const haystack = [track.title, track.artist, track.album, track.styleDescription]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+        if (!haystack.includes(needle)) return false
+      }
+      return true
+    })
+
+    setTracks(filtered)
     setLibraryTracks(nextLibraryTracks)
     setPlaylists(nextPlaylists)
-    setJobs(nextJobs)
+    setActiveJobs(nextJobs.filter((job) => job.status === 'queued' || job.status === 'downloading'))
     setSettings(nextSettings)
-    setActiveTrack((current) => current ?? nextTracks[0] ?? null)
+    setActiveTrack((current) => current ?? filtered[0] ?? null)
   }, [favoritesOnly, search, source])
 
   useEffect(() => {
@@ -114,11 +157,32 @@ function App() {
   }, [refresh])
 
   useEffect(() => {
-    const unsubscribe = audioEngine.subscribe(() => setPlaying(audioEngine.isPlaying))
+    if (activeJobs.length === 0) return
+    const interval = window.setInterval(() => void refresh(), 1500)
+    return () => window.clearInterval(interval)
+  }, [activeJobs.length, refresh])
+
+  useEffect(() => {
+    const sync = () => {
+      setPlaying(audioEngine.isPlaying)
+      if (!seekingRef.current) setCurrentTime(audioEngine.currentTime)
+      setDuration(audioEngine.duration)
+      setHasPrev(audioEngine.hasPrevious())
+      setHasNext(audioEngine.hasNext())
+      setShuffle(audioEngine.shuffleEnabled)
+      setRepeatMode(audioEngine.repeatMode)
+      setQueueTracks(audioEngine.getQueueInPlayOrder())
+      if (audioEngine.currentTrack && audioEngine.currentTrack.id !== activeTrack?.id) {
+        setActiveTrack(audioEngine.currentTrack)
+      }
+    }
+    const unsubscribe = audioEngine.subscribe(sync)
+    sync()
     return () => {
       unsubscribe()
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTrack?.id])
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme
@@ -134,10 +198,49 @@ function App() {
   }, [fullscreen])
 
   useEffect(() => {
-    if (!fullscreen) return
+    if (!fullscreen || !overlayVisible) return
     const timeout = window.setTimeout(() => setOverlayVisible(false), 2400)
     return () => window.clearTimeout(timeout)
   }, [fullscreen, overlayVisible])
+
+  useEffect(() => {
+    const isEditable = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false
+      const tag = target.tagName
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (isEditable(event.target)) return
+      if (event.key === ' ' || event.code === 'Space') {
+        event.preventDefault()
+        void togglePlay()
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        audioEngine.seekBy(-5)
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        audioEngine.seekBy(5)
+      } else if (event.key === 'f' || event.key === 'F') {
+        event.preventDefault()
+        setFullscreen((value) => !value)
+      } else if (event.key === 'm' || event.key === 'M') {
+        event.preventDefault()
+        toggleMute()
+      } else if (event.key === 'n' || event.key === 'N') {
+        if (audioEngine.hasNext()) void audioEngine.next()
+      } else if (event.key === 'p' || event.key === 'P') {
+        if (audioEngine.hasPrevious()) void audioEngine.previous()
+      } else if (event.key === 's' || event.key === 'S') {
+        audioEngine.toggleShuffle()
+      } else if (event.key === 'r' || event.key === 'R') {
+        audioEngine.cycleRepeat()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTrack?.id])
 
   const totals = useMemo(
     () => ({
@@ -153,17 +256,73 @@ function App() {
     [libraryTracks],
   )
 
+  const currentScope = useMemo<PlaybackScope>(() => {
+    if (activePlaylistId != null) {
+      const found = playlists.find((p) => p.id === activePlaylistId)
+      return { kind: 'playlist', id: activePlaylistId, name: found?.name ?? 'Playlist' }
+    }
+    if (source === 'all') return { kind: 'all' }
+    return { kind: 'source', source }
+  }, [activePlaylistId, playlists, source])
+
   const selectAndPlay = async (track: Track) => {
     setActiveTrack(track)
-    audioEngine.load(track)
-    await audioEngine.play()
+    const label = scopeLabel(currentScope)
+    setQueueScope(currentScope)
+    audioEngine.startQueue(tracks, label, track.id)
   }
 
   const togglePlay = async () => {
+    if (!activeTrack && tracks[0]) {
+      await selectAndPlay(tracks[0])
+      return
+    }
     if (!activeTrack) return
-    if (audioEngine.currentTrack?.id !== activeTrack.id) audioEngine.load(activeTrack)
+    if (audioEngine.currentTrack?.id !== activeTrack.id) {
+      const label = scopeLabel(currentScope)
+      setQueueScope(currentScope)
+      audioEngine.startQueue(tracks, label, activeTrack.id)
+      return
+    }
     if (audioEngine.isPlaying) audioEngine.pause()
     else await audioEngine.play()
+  }
+
+  const handleVolume = (event: ChangeEvent<HTMLInputElement>) => {
+    const next = Number(event.target.value)
+    setVolume(next)
+    audioEngine.setVolume(next)
+  }
+
+  const lastNonZeroVolume = useRef(volume || 0.6)
+  useEffect(() => {
+    if (volume > 0) lastNonZeroVolume.current = volume
+  }, [volume])
+
+  const toggleMute = () => {
+    if (volume > 0) {
+      lastNonZeroVolume.current = volume
+      setVolume(0)
+      audioEngine.setVolume(0)
+    } else {
+      const restored = lastNonZeroVolume.current || 0.6
+      setVolume(restored)
+      audioEngine.setVolume(restored)
+    }
+  }
+
+  const handleScrubBegin = () => {
+    seekingRef.current = true
+  }
+  const handleScrubChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const v = Number(event.target.value)
+    setScrubValue(v)
+    setCurrentTime(v)
+    audioEngine.seek(v)
+  }
+  const handleScrubEnd = () => {
+    seekingRef.current = false
+    setScrubValue(null)
   }
 
   const updateSettings = async (patch: Partial<AppSettings>) => {
@@ -173,8 +332,16 @@ function App() {
 
   const renderVisualizer = () => {
     if (visualizerMode === 'waveform') return <WaveformVisualizer />
-    return <BarsVisualizer compact={!fullscreen} />
+    if (visualizerMode === 'bars') return <BarsVisualizer compact={!fullscreen} />
+    return <CoverVisualizer track={activeTrack} playing={playing} />
   }
+
+  const scrubMax = duration > 0 ? duration : 1
+  const scrubDisplay = scrubValue ?? currentTime
+  const scrubPct = scrubMax > 0 ? Math.min(100, (scrubDisplay / scrubMax) * 100) : 0
+  const remaining = Math.max(0, (duration || 0) - scrubDisplay)
+  const volumePct = Math.round(volume * 100)
+  const coverUrl = activeTrack ? mediaUrl(activeTrack.coverPath) : null
 
   if (fullscreen) {
     return (
@@ -186,35 +353,78 @@ function App() {
         {renderVisualizer()}
         <div className={`fullscreen-overlay ${overlayVisible ? 'visible' : ''}`}>
           <div className="fullscreen-overlay-top">
-            <span className="eyebrow">Now playing — Polysong</span>
+            <div className="fullscreen-eyebrow-block">
+              <span className="eyebrow">Now Playing — Polysong</span>
+              {queueScope && <span className="fullscreen-scope">{scopeLabel(queueScope)}</span>}
+            </div>
+            <div className="fullscreen-mode-picker" role="tablist" aria-label="Visualizer mode">
+              {VISUALIZER_MODES.map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="tab"
+                  aria-selected={visualizerMode === mode}
+                  className={visualizerMode === mode ? 'selected' : ''}
+                  onClick={() => setVisualizerMode(mode)}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
             <Button icon={<Minimize2 size={17} />} onClick={() => setFullscreen(false)}>
               Exit fullscreen
             </Button>
           </div>
-          <div />
+
           <div className="fullscreen-overlay-bottom">
-            <div className="fullscreen-overlay-text">
+            <div className="fullscreen-text">
               <h1>{activeTrack?.title ?? 'No track selected'}</h1>
               {activeTrack?.styleDescription ? (
                 <p className="style-line">
-                  <Sparkles size={18} />
+                  <Sparkles size={16} />
                   <span>{activeTrack.styleDescription}</span>
                 </p>
               ) : (
-                <p className="style-line">
-                  <span>{activeTrack?.artist ?? 'Load a track from the library to begin.'}</span>
+                <p className="artist-line">
+                  {activeTrack?.artist ?? 'Load a track from the library to begin.'}
                 </p>
               )}
             </div>
             <div className="fullscreen-controls">
               <Button
-                icon={playing ? <Pause size={18} /> : <Play size={18} />}
+                icon={<Shuffle size={16} />}
+                className={shuffle ? 'transport-toggle on fullscreen-button' : 'transport-toggle fullscreen-button'}
+                onClick={() => audioEngine.toggleShuffle()}
+                aria-pressed={shuffle}
+                aria-label={shuffle ? 'Shuffle on' : 'Shuffle off'}
+              />
+              <Button
+                icon={<SkipBack size={18} />}
+                className="fullscreen-button"
+                onClick={() => void audioEngine.previous()}
+                disabled={!hasPrev}
+                aria-label="Previous track"
+              />
+              <Button
+                icon={playing ? <Pause size={20} /> : <Play size={20} />}
                 variant="primary"
                 onClick={togglePlay}
-              >
-                {playing ? 'Pause' : 'Play'}
-              </Button>
-              <Button icon={<X size={18} />} onClick={() => setFullscreen(false)} aria-label="Exit fullscreen" />
+                aria-label={playing ? 'Pause' : 'Play'}
+              />
+              <Button
+                icon={<SkipForward size={18} />}
+                className="fullscreen-button"
+                onClick={() => void audioEngine.next()}
+                disabled={!hasNext}
+                aria-label="Next track"
+              />
+              <Button
+                icon={repeatMode === 'one' ? <Repeat1 size={16} /> : <Repeat size={16} />}
+                className={repeatMode !== 'off' ? 'transport-toggle on fullscreen-button' : 'transport-toggle fullscreen-button'}
+                onClick={() => audioEngine.cycleRepeat()}
+                aria-pressed={repeatMode !== 'off'}
+                aria-label={`Repeat: ${repeatMode}`}
+              />
             </div>
           </div>
         </div>
@@ -250,9 +460,12 @@ function App() {
                 key={value}
                 type="button"
                 data-source={value}
-                className={source === value ? 'selected' : ''}
-                onClick={() => setSource(value)}
-                aria-pressed={source === value}
+                className={source === value && activePlaylistId == null ? 'selected' : ''}
+                onClick={() => {
+                  setSource(value)
+                  setActivePlaylistId(null)
+                }}
+                aria-pressed={source === value && activePlaylistId == null}
               >
                 <span className="src-dot" aria-hidden />
                 <span className="src-label">{value === 'all' ? 'All sources' : value}</span>
@@ -269,13 +482,19 @@ function App() {
               icon={<Plus size={15} />}
               variant="quiet"
               aria-label="Create playlist"
-              onClick={() => void api.createPlaylist('New playlist').then(refresh)}
+              onClick={() => setCreatePlaylistOpen(true)}
             />
           </div>
           <div className="playlist-list">
             {playlists.length === 0 && <p className="playlist-empty">No playlists yet.</p>}
             {playlists.map((playlist) => (
-              <button className="playlist-item" type="button" key={playlist.id}>
+              <button
+                className={`playlist-item ${activePlaylistId === playlist.id ? 'selected' : ''}`}
+                type="button"
+                key={playlist.id}
+                onClick={() => setActivePlaylistId(playlist.id)}
+                aria-pressed={activePlaylistId === playlist.id}
+              >
                 <ListMusic size={15} />
                 <span>{playlist.name}</span>
                 <em>{playlist.trackCount}</em>
@@ -320,29 +539,28 @@ function App() {
             onClick={() => setSettingsOpen(true)}
           />
           <Button
-            icon={rightPanelOpen ? <EyeOff size={16} /> : <Eye size={16} />}
+            icon={rightPanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
             variant="ghost"
             aria-label={rightPanelOpen ? 'Hide detail panel' : 'Show detail panel'}
             onClick={() => setRightPanelOpen((value) => !value)}
           />
         </header>
 
-        <section className="library-header">
+        <header className="library-header">
           <div className="library-header-text">
-            <span className="eyebrow">Unified library</span>
-            <h1>
-              Tracks from local files, YouTube, and Suno in <em>one queue</em>.
-            </h1>
-            <div className="library-header-meta">
-              <span><strong>{libraryTracks.length}</strong> tracks</span>
-              <span><strong>{totals.suno}</strong> Suno</span>
-              <span><strong>{totals.youtube}</strong> YouTube</span>
-              <span><strong>{totals.local}</strong> local</span>
-              <span><strong>{formatDuration(totalDurationMs)}</strong> total</span>
-            </div>
+            <h1>{scopeLabel(currentScope)}</h1>
+          </div>
+          <div className="library-header-meta">
+            <span><strong>{libraryTracks.length}</strong> tracks</span>
+            <span className="meta-sep" aria-hidden>·</span>
+            <span><strong>{totals.suno}</strong> Suno</span>
+            <span><strong>{totals.youtube}</strong> YouTube</span>
+            <span><strong>{totals.local}</strong> local</span>
+            <span className="meta-sep" aria-hidden>·</span>
+            <span><strong>{formatDuration(totalDurationMs)}</strong> total</span>
           </div>
           <div className="library-header-controls">
-            <label className="checkbox-line">
+            <label className="checkbox-line inline">
               <input
                 type="checkbox"
                 checked={favoritesOnly}
@@ -351,11 +569,23 @@ function App() {
               Favorites only
             </label>
           </div>
-        </section>
+        </header>
+
+        {activeJobs.length > 0 && (
+          <div className="loading-cards" aria-live="polite">
+            {activeJobs.map((job) => (
+              <LoadingCard key={job.id} job={job} />
+            ))}
+          </div>
+        )}
 
         <section className="track-list" aria-label="Tracks">
           {tracks.length === 0 && (
-            <p className="track-list-empty">No tracks match. Adjust filters or queue an ingest.</p>
+            <p className="track-list-empty">
+              {activeJobs.length > 0
+                ? 'Waiting for the first imports to land — your library will populate as ingests finish.'
+                : 'No tracks match. Adjust filters or queue an ingest.'}
+            </p>
           )}
           {tracks.map((track) => (
             <TrackRow
@@ -374,72 +604,73 @@ function App() {
 
       <aside
         className={`sidebar right ${rightPanelOpen ? 'open' : 'closed'}`}
-        aria-label="Visualizer and now playing"
+        aria-label="Now playing and queue"
       >
-        <section aria-labelledby="visualizer-heading">
-          <div className="rail-heading-block">
-            <h2 id="visualizer-heading">Visualizer</h2>
-            <Button icon={<Maximize2 size={14} />} variant="ghost" onClick={() => setFullscreen(true)}>
-              Full
-            </Button>
+        <section className="now-playing-header">
+          <div className="now-playing-header-text">
+            <span className="eyebrow">Now Playing</span>
+            <span className="now-playing-scope">{queueScope ? scopeLabel(queueScope) : 'No active queue'}</span>
           </div>
-          <div className="visualizer-card">{renderVisualizer()}</div>
-          <div className="segmented" role="tablist" aria-label="Visualizer mode">
-            {(['bars', 'waveform', 'radial'] as VisualizerMode[]).map((mode) => (
-              <button
-                key={mode}
-                role="tab"
-                aria-selected={visualizerMode === mode}
-                disabled={mode === 'radial'}
-                className={visualizerMode === mode ? 'selected' : ''}
-                type="button"
-                onClick={() => setVisualizerMode(mode)}
-              >
-                {mode === 'radial' ? 'radial · soon' : mode}
-              </button>
-            ))}
-          </div>
+          <Button
+            icon={<Maximize2 size={14} />}
+            variant="ghost"
+            onClick={() => setFullscreen(true)}
+            aria-label="Open fullscreen visualizer"
+          >
+            Full
+          </Button>
         </section>
 
         <section className="now-playing-detail" aria-labelledby="selected-heading">
-          <div className="eyebrow">
-            <span id="selected-heading">Selected</span>
-            {activeTrack && <span>{formatDuration(activeTrack.durationMs)}</span>}
+          <div className="now-playing-eyebrow">
+            <span className="eyebrow" id="selected-heading">Selected</span>
+            {activeTrack && <span className="now-playing-duration">{formatDuration(activeTrack.durationMs)}</span>}
           </div>
           <h2>{activeTrack?.title ?? 'No track loaded'}</h2>
-          <p className="artist-line">
-            {activeTrack?.artist ?? 'Choose a track to load the audio engine.'}
-          </p>
-          {activeTrack?.styleDescription && (
-            <div className="style-quote">
-              <Sparkles size={15} />
-              <span>{activeTrack.styleDescription}</span>
-            </div>
-          )}
+          <p className="artist-line">{activeTrack?.artist ?? 'Choose a track to load the audio engine.'}</p>
         </section>
 
-        <section className="queue-panel" aria-labelledby="queue-heading">
+        <section className="queue-panel queue-panel-fill" aria-labelledby="queue-heading">
           <div className="rail-heading">
-            <h2 id="queue-heading">Ingest queue</h2>
-            <span className="rail-heading-count">{jobs.length}</span>
+            <h2 id="queue-heading">Queue</h2>
+            <span className="rail-heading-count">{queueTracks.length}</span>
           </div>
-          {jobs.length === 0 && <p className="queue-empty">No jobs yet — queue one with the Ingest button.</p>}
-          {jobs.map((job) => (
-            <div className="job" key={job.id}>
-              <span className="job-source">{job.source}</span>
-              <strong className="job-status" data-status={job.status}>
-                {job.status}
-              </strong>
-              <ProgressBar value={job.progress} />
-            </div>
-          ))}
+          {queueTracks.length === 0 && (
+            <p className="queue-empty">Press play on any track to start a queue.</p>
+          )}
+          <div className="queue-list queue-list-fill">
+            {queueTracks.map((track, index) => (
+              <button
+                key={`${track.id}-${index}`}
+                className={`queue-item ${activeTrack?.id === track.id ? 'active' : ''}`}
+                type="button"
+                onClick={() => void selectAndPlay(track)}
+                aria-current={activeTrack?.id === track.id ? 'true' : undefined}
+              >
+                <span className="queue-index">
+                  {activeTrack?.id === track.id ? (
+                    <span className={`queue-indicator ${playing ? 'playing' : ''}`} aria-hidden>
+                      <span /><span /><span />
+                    </span>
+                  ) : (
+                    index + 1
+                  )}
+                </span>
+                <span className="queue-title-block">
+                  <span className="queue-title">{track.title}</span>
+                  {track.artist && <span className="queue-artist">{track.artist}</span>}
+                </span>
+                <span className="queue-duration">{formatDuration(track.durationMs)}</span>
+              </button>
+            ))}
+          </div>
         </section>
       </aside>
 
       <footer className="player-bar" aria-label="Player">
         <div className="player-meta">
           <div className={`mini-cover ${playing ? 'playing' : ''}`} aria-hidden>
-            <Disc3 size={20} strokeWidth={2.2} />
+            {coverUrl ? <img src={coverUrl} alt="" /> : <Disc3 size={20} strokeWidth={2.2} />}
           </div>
           <div className="player-meta-text">
             <span className="now">{playing ? 'Now playing' : 'Idle'}</span>
@@ -451,35 +682,90 @@ function App() {
             </span>
           </div>
         </div>
-        <Button
-          icon={playing ? <Pause size={18} /> : <Play size={18} />}
-          variant="primary"
-          onClick={togglePlay}
-          aria-label={playing ? 'Pause' : 'Play'}
-        >
-          {playing ? 'Pause' : 'Play'}
-        </Button>
-        <span className="topbar-divider" aria-hidden />
-        <label className="player-volume">
-          <span className="muted" style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', letterSpacing: '0.16em', textTransform: 'uppercase' }}>
-            VOL
-          </span>
+
+        <div className="transport" role="group" aria-label="Playback controls">
+          <Button
+            icon={<Shuffle size={15} />}
+            variant="ghost"
+            className={shuffle ? 'transport-toggle on' : 'transport-toggle'}
+            onClick={() => audioEngine.toggleShuffle()}
+            aria-pressed={shuffle}
+            aria-label={shuffle ? 'Shuffle on' : 'Shuffle off'}
+          />
+          <Button
+            icon={<SkipBack size={17} />}
+            variant="ghost"
+            disabled={!hasPrev}
+            onClick={() => void audioEngine.previous()}
+            aria-label="Previous track"
+          />
+          <Button
+            icon={playing ? <Pause size={18} /> : <Play size={18} />}
+            variant="primary"
+            onClick={togglePlay}
+            disabled={!activeTrack && tracks.length === 0}
+            aria-label={playing ? 'Pause' : 'Play'}
+          />
+          <Button
+            icon={<SkipForward size={17} />}
+            variant="ghost"
+            disabled={!hasNext}
+            onClick={() => void audioEngine.next()}
+            aria-label="Next track"
+          />
+          <Button
+            icon={repeatMode === 'one' ? <Repeat1 size={15} /> : <Repeat size={15} />}
+            variant="ghost"
+            className={repeatMode !== 'off' ? 'transport-toggle on' : 'transport-toggle'}
+            onClick={() => audioEngine.cycleRepeat()}
+            aria-pressed={repeatMode !== 'off'}
+            aria-label={`Repeat: ${repeatMode}`}
+          />
+        </div>
+
+        <div className="scrubber">
+          <span className="time-elapsed" aria-live="off">{formatTime(scrubDisplay)}</span>
+          <input
+            className="scrub"
+            type="range"
+            min={0}
+            max={scrubMax}
+            step={0.1}
+            value={scrubDisplay}
+            disabled={!duration}
+            style={{ ['--scrub-pct' as string]: `${scrubPct}%` }}
+            onMouseDown={handleScrubBegin}
+            onTouchStart={handleScrubBegin}
+            onPointerDown={handleScrubBegin}
+            onChange={handleScrubChange}
+            onMouseUp={handleScrubEnd}
+            onTouchEnd={handleScrubEnd}
+            onPointerUp={handleScrubEnd}
+            onBlur={handleScrubEnd}
+            aria-label="Seek"
+          />
+          <span className="time-remaining" aria-live="off">−{formatTime(remaining)}</span>
+        </div>
+
+        <div className="player-volume">
+          <Button
+            icon={volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            variant="ghost"
+            onClick={toggleMute}
+            aria-label={volume === 0 ? 'Unmute' : 'Mute'}
+          />
           <input
             className="volume"
             type="range"
-            min="0"
-            max="1"
-            step="0.01"
+            min={0}
+            max={1}
+            step={0.01}
             value={volume}
-            style={{ ['--volume-pct' as string]: `${Math.round(volume * 100)}%` }}
-            onChange={(event) => {
-              const next = Number(event.target.value)
-              setVolume(next)
-              audioEngine.setVolume(next)
-            }}
+            style={{ ['--volume-pct' as string]: `${volumePct}%` }}
+            onChange={handleVolume}
             aria-label="Volume"
           />
-        </label>
+        </div>
       </footer>
 
       <IngestDialog
@@ -487,13 +773,107 @@ function App() {
         settings={settings}
         onClose={() => setIngestOpen(false)}
         onSettings={updateSettings}
-        onDone={() => {
+        onQueued={() => {
           setIngestOpen(false)
           void refresh()
         }}
       />
       <SettingsDialog open={settingsOpen} settings={settings} onClose={() => setSettingsOpen(false)} onUpdate={updateSettings} />
+      <CreatePlaylistDialog
+        open={createPlaylistOpen}
+        onClose={() => setCreatePlaylistOpen(false)}
+        onCreate={async (name) => {
+          await api.createPlaylist(name)
+          setCreatePlaylistOpen(false)
+          await refresh()
+        }}
+      />
     </main>
+  )
+}
+
+function LoadingCard({ job }: { job: IngestJob }) {
+  const pct = Math.round(Math.max(0, Math.min(1, job.progress)) * 100)
+  return (
+    <article className="loading-card" data-source={job.source}>
+      <div className="loading-card-icon" aria-hidden>
+        <Loader2 size={18} className="spin" />
+      </div>
+      <div className="loading-card-text">
+        <span className="loading-card-eyebrow">
+          {job.status === 'downloading' ? 'Downloading' : 'Queued'} · {sourceLabel(job.source)}
+        </span>
+        <strong className="loading-card-title">{readableInput(job.input)}</strong>
+        <div className="loading-card-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+          <span style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+      <span className="loading-card-pct">{pct}%</span>
+    </article>
+  )
+}
+
+function readableInput(input: string) {
+  if (!input) return 'Importing…'
+  if (input.length <= 64) return input
+  return input.slice(0, 60) + '…'
+}
+
+function CreatePlaylistDialog({
+  open,
+  onClose,
+  onCreate,
+}: {
+  open: boolean
+  onClose: () => void
+  onCreate: (name: string) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (!open) {
+      setName('')
+      setSubmitting(false)
+    }
+  }, [open])
+
+  const submit = async () => {
+    const trimmed = name.trim()
+    if (!trimmed || submitting) return
+    setSubmitting(true)
+    try {
+      await onCreate(trimmed)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Modal title="New playlist" eyebrow="Library" open={open} onClose={onClose}>
+      <div className="form-stack">
+        <div className="form-field">
+          <label className="form-field-label" htmlFor="new-playlist-name">Name</label>
+          <input
+            id="new-playlist-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void submit()
+            }}
+            placeholder="e.g. Late Night Suno, Workout, Field Recordings"
+            spellCheck={false}
+            autoFocus
+          />
+        </div>
+        <div className="modal-footer">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!name.trim() || submitting} onClick={() => void submit()}>
+            {submitting ? 'Creating…' : 'Create'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -502,46 +882,73 @@ function IngestDialog({
   settings,
   onClose,
   onSettings,
-  onDone,
+  onQueued,
 }: {
   open: boolean
   settings: AppSettings
   onClose: () => void
   onSettings: (patch: Partial<AppSettings>) => Promise<void>
-  onDone: () => void
+  onQueued: () => void
 }) {
   const [source, setSource] = useState<AudioSource>('suno')
-  const [input, setInput] = useState('https://suno.com/s/x05KvNFq7Tn5KqyR')
+  const [input, setInput] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (!open) {
+      setInput('')
+      setFile(null)
+      setSubmitting(false)
+    }
+  }, [open])
+
   const needsYoutubeConsent = source === 'youtube' && !settings.youtubeConsent
   const needsSunoConsent = source === 'suno' && !settings.sunoAdvancedEnabled
   const cannotSubmit = source === 'local' ? !file : !input.trim() || needsYoutubeConsent || needsSunoConsent
 
   const submit = async () => {
-    if (source === 'local') {
-      if (!file) return
-      await api.uploadLocal(file)
-      onDone()
-      return
-    }
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      if (source === 'local') {
+        if (!file) return
+        await api.uploadLocal(file)
+        onQueued()
+        return
+      }
 
-    await api.ingestUrl({
-      source,
-      input,
-      advancedPublicSuno: settings.sunoAdvancedEnabled,
-      consentAccepted: source === 'youtube' ? settings.youtubeConsent : source === 'suno' ? settings.sunoAdvancedEnabled : true,
-    })
-    onDone()
+      await api.ingestUrl({
+        source,
+        input,
+        advancedPublicSuno: settings.sunoAdvancedEnabled,
+        consentAccepted: source === 'youtube' ? settings.youtubeConsent : source === 'suno' ? settings.sunoAdvancedEnabled : true,
+      })
+      onQueued()
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const sourceTitle =
-    source === 'suno' ? 'Suno import — advanced public URL mode' : source === 'youtube' ? 'YouTube import — rights confirmation required' : 'Local import'
+    source === 'suno'
+      ? 'Suno import — advanced public URL mode'
+      : source === 'youtube'
+        ? 'YouTube import — rights confirmation required'
+        : 'Local import'
   const sourceCopy =
     source === 'suno'
       ? 'Paste a Suno song, short link, or playlist. Playlist imports expand into one downloaded track per clip with style, prompt, cover, and duration metadata when available.'
       : source === 'youtube'
         ? 'Only import audio you own or have explicit rights to download. Polysong does not host or transmit copyrighted media on your behalf.'
         : 'Choose an audio file from this machine. The backend copies it into songs/local and extracts embedded metadata and cover art when ffmpeg is available.'
+
+  const placeholder =
+    source === 'suno'
+      ? 'https://suno.com/song/… or /s/…'
+      : source === 'youtube'
+        ? 'https://www.youtube.com/watch?v=…'
+        : 'Optional note for this import'
 
   return (
     <Modal title="Queue an ingest" eyebrow="Ingest pipeline" open={open} onClose={onClose}>
@@ -579,7 +986,7 @@ function IngestDialog({
           <input
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="https://… or /Music/…"
+            placeholder={placeholder}
             spellCheck={false}
             autoComplete="off"
           />
@@ -612,11 +1019,11 @@ function IngestDialog({
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            icon={<Upload size={16} />}
-            disabled={cannotSubmit}
-            onClick={submit}
+            icon={submitting ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
+            disabled={cannotSubmit || submitting}
+            onClick={() => void submit()}
           >
-            {source === 'local' ? 'Upload track' : 'Queue ingest'}
+            {submitting ? 'Queuing…' : source === 'local' ? 'Upload track' : 'Queue ingest'}
           </Button>
         </div>
       </div>
@@ -638,42 +1045,60 @@ function SettingsDialog({
   return (
     <Modal title="Workspace settings" eyebrow="Polysong" open={open} onClose={onClose}>
       <div className="form-stack">
-        <label>
-          Theme
-          <select value={settings.theme} onChange={(event) => void onUpdate({ theme: event.target.value as AppSettings['theme'] })}>
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-            <option value="system">System</option>
-          </select>
-        </label>
-        <label>
-          Concurrent downloads
+        <div className="form-field">
+          <span className="form-field-label">Theme</span>
+          <Select
+            value={settings.theme}
+            options={[
+              { value: 'dark', label: 'Dark' },
+              { value: 'light', label: 'Light' },
+              { value: 'system', label: 'System' },
+            ]}
+            onChange={(next) => void onUpdate({ theme: next as AppSettings['theme'] })}
+            ariaLabel="Theme"
+          />
+        </div>
+        <div className="form-field">
+          <label className="form-field-label" htmlFor="settings-concurrent">Concurrent downloads</label>
           <input
+            id="settings-concurrent"
             type="number"
-            min="1"
-            max="6"
+            min={1}
+            max={6}
             value={settings.maxConcurrentDownloads}
             onChange={(event) => void onUpdate({ maxConcurrentDownloads: Number(event.target.value) })}
           />
-        </label>
-        <label className="checkbox-line">
-          <input
-            type="checkbox"
-            checked={settings.sunoAdvancedEnabled}
-            onChange={(event) => void onUpdate({ sunoAdvancedEnabled: event.target.checked })}
-          />
-          Suno public URL advanced mode
-        </label>
+          <p className="form-field-help">
+            How many ingest jobs run at the same time. The rest queue up and start as slots free up — set
+            higher when you have a fast connection, lower if your network or the source is rate-limited.
+          </p>
+        </div>
+        <div className="form-field">
+          <label className="checkbox-line">
+            <input
+              type="checkbox"
+              checked={settings.sunoAdvancedEnabled}
+              onChange={(event) => void onUpdate({ sunoAdvancedEnabled: event.target.checked })}
+            />
+            Suno public URL advanced mode
+          </label>
+          <p className="form-field-help">
+            Off: Polysong only imports Suno songs from your own account. On: you can also paste public Suno
+            song or playlist URLs (someone else's tracks). Only enable this for content you have the right
+            to keep locally — Suno's terms still apply.
+          </p>
+        </div>
         <div className="notice">
           <strong>Audio root</strong>
           <p>
-            <code style={{ fontFamily: 'var(--font-mono)' }}>{settings.audioRoot}</code>. Imports are assigned to `songs/suno`, `songs/youtube`, or `songs/local` under the app data directory.
+            <code className="inline-code">{settings.audioRoot}</code>. Imports are assigned to{' '}
+            <code className="inline-code">songs/suno</code>,{' '}
+            <code className="inline-code">songs/youtube</code>, or{' '}
+            <code className="inline-code">songs/local</code> under the app data directory.
           </p>
         </div>
         <div className="modal-footer">
-          <Button variant="primary" onClick={onClose}>
-            Done
-          </Button>
+          <Button variant="primary" onClick={onClose}>Done</Button>
         </div>
       </div>
     </Modal>
