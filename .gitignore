@@ -9,4 +9,5 @@ dist/
 *.db-wal
 .dev/
 songs/
+tools/
 src-tauri/installer-tools/
