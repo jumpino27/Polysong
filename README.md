@@ -60,6 +60,42 @@ If you install to the default Windows user location, this is usually:
 C:\Users\<you>\AppData\Local\Polysong
 ```
 
+The Windows installer also bundles the helper tools Polysong needs for imports:
+
+- `yt-dlp.exe` for YouTube imports
+- LGPL `ffmpeg.exe` and `ffprobe.exe` for local-file metadata and cover extraction
+
+They are installed into:
+
+```text
+Polysong/
+  tools/
+    yt-dlp.exe
+    ffmpeg.exe
+    ffprobe.exe
+```
+
+Polysong uses these bundled tools first, then falls back to tools on `PATH` if needed.
+
+### Code Signing
+
+`installer_windows.bat` supports Authenticode signing if you provide a trusted code-signing certificate:
+
+```bat
+set POLYSONG_SIGN_CERT_PATH=C:\path\to\certificate.pfx
+set POLYSONG_SIGN_CERT_PASSWORD=your-password
+installer_windows.bat
+```
+
+Or with a certificate already installed in the Windows certificate store:
+
+```bat
+set POLYSONG_SIGN_CERT_THUMBPRINT=YOUR_CERT_THUMBPRINT
+installer_windows.bat
+```
+
+Without a trusted certificate, the installer is built unsigned and Windows SmartScreen may warn users.
+
 ## Run From The Codebase
 
 Use these scripts when you want to run Polysong locally from the source code instead of installing it.
@@ -78,6 +114,8 @@ Start the local backend and browser frontend:
 start_no_exe.bat
 ```
 
+No-exe mode uses this project folder as its data directory and runs its backend on `http://127.0.0.1:4778`, so it does not mix with the installed app.
+
 ### Linux And macOS
 
 First setup:
@@ -93,6 +131,8 @@ Start the local backend and browser frontend:
 ```
 
 These scripts are only for local development/testing. They do not build an installer.
+
+The installed Windows app keeps its own database and songs beside the installed executable. The source-code scripts keep their database and songs inside this repository folder.
 
 ## What The Scripts Do
 
@@ -121,7 +161,7 @@ If you prefer package commands:
 
 ## Requirements
 
-The setup scripts try to keep tools local to this project where possible. If you install things manually, you need:
+The setup scripts try to keep tools local to this project where possible. If you install things manually for development, you need:
 
 - Node.js and pnpm
 - Rust and Cargo

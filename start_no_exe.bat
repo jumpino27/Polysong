@@ -8,6 +8,9 @@ set "PROJECT_NODE_DIR=%DEV_DIR%\node"
 set "PROJECT_PNPM_BIN=%DEV_DIR%\pnpm\node_modules\.bin"
 set "PROJECT_CARGO_HOME=%DEV_DIR%\cargo"
 set "PROJECT_RUSTUP_HOME=%DEV_DIR%\rustup"
+set "POLYSONG_DATA_DIR=%PROJECT_DIR%"
+set "POLYSONG_BACKEND_PORT=4778"
+set "VITE_POLYSONG_BACKEND_URL=http://127.0.0.1:%POLYSONG_BACKEND_PORT%"
 
 if exist "%PROJECT_NODE_DIR%\node.exe" set "PATH=%PROJECT_NODE_DIR%;%PATH%"
 if exist "%PROJECT_PNPM_BIN%\pnpm.cmd" set "PATH=%PROJECT_PNPM_BIN%;%PATH%"
@@ -39,8 +42,10 @@ if not exist "%PROJECT_DIR%\frontend\node_modules" (
   exit /b 1
 )
 
-start "" "http://localhost:5173"
 echo Starting Polysong backend and browser frontend.
+echo Data directory: "%POLYSONG_DATA_DIR%"
+echo Backend URL: "%VITE_POLYSONG_BACKEND_URL%"
 echo Close this window or press Ctrl+C to stop the dev servers.
+start "" "http://localhost:5173"
 call pnpm dev
 

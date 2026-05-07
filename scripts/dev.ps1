@@ -5,9 +5,13 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $backendLog = Join-Path $logDir 'backend.log'
 $backendErr = Join-Path $logDir 'backend.err.log'
-$backendPort = 4777
+$backendPort = if ($env:POLYSONG_BACKEND_PORT) { [int]$env:POLYSONG_BACKEND_PORT } else { 4778 }
 $backendExe = Join-Path $projectDir 'target\debug\polysong-app.exe'
 $resolvedBackendExe = (Resolve-Path -LiteralPath $backendExe -ErrorAction SilentlyContinue).Path
+
+$env:POLYSONG_DATA_DIR = $projectDir
+$env:POLYSONG_BACKEND_PORT = [string]$backendPort
+$env:VITE_POLYSONG_BACKEND_URL = "http://127.0.0.1:$backendPort"
 
 Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $backendPort -State Listen -ErrorAction SilentlyContinue |
   ForEach-Object {
@@ -39,6 +43,8 @@ try {
     $stderr = if (Test-Path $backendErr) { Get-Content -Raw $backendErr } else { '' }
     throw "Polysong backend failed to start.`n$stderr"
   }
+  Write-Host "Polysong no-exe mode is using data at $projectDir"
+  Write-Host "Polysong no-exe backend is http://127.0.0.1:$backendPort"
   pnpm -C frontend dev
 }
 finally {

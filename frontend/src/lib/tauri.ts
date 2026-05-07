@@ -27,8 +27,9 @@ import {
 } from './mock'
 
 const hasTauri = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
-const backendUrl = 'http://127.0.0.1:4777/api'
-const mediaBaseUrl = 'http://127.0.0.1:4777/media'
+const backendBaseUrl = (import.meta.env.VITE_POLYSONG_BACKEND_URL ?? 'http://127.0.0.1:4777').replace(/\/$/, '')
+const backendUrl = `${backendBaseUrl}/api`
+const mediaBaseUrl = `${backendBaseUrl}/media`
 
 async function callHttp<T>(command: string, args: Record<string, unknown>): Promise<T> {
   const response = await fetch(`${backendUrl}/${command}`, {

@@ -7,8 +7,11 @@ PROJECT_NODE_DIR="$DEV_DIR/node"
 PROJECT_PNPM_BIN="$DEV_DIR/pnpm/node_modules/.bin"
 PROJECT_CARGO_HOME="$DEV_DIR/cargo"
 PROJECT_RUSTUP_HOME="$DEV_DIR/rustup"
-BACKEND_PORT=4777
+BACKEND_PORT="${POLYSONG_BACKEND_PORT:-4778}"
 BACKEND_PID=""
+export POLYSONG_DATA_DIR="$PROJECT_DIR"
+export POLYSONG_BACKEND_PORT="$BACKEND_PORT"
+export VITE_POLYSONG_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 
 if [[ -x "$PROJECT_NODE_DIR/bin/node" ]]; then
   export PATH="$PROJECT_NODE_DIR/bin:$PATH"
@@ -101,5 +104,7 @@ fi
 
 open_browser
 echo "Starting Polysong backend and browser frontend."
+echo "Data directory: $POLYSONG_DATA_DIR"
+echo "Backend URL: $VITE_POLYSONG_BACKEND_URL"
 echo "Press Ctrl+C to stop the dev servers."
 pnpm -C frontend dev

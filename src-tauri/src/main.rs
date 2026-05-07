@@ -556,6 +556,21 @@ fn run_http_backend() -> Result<(), String> {
     serve_http_backend(backend)
 }
 
+fn backend_bind_addr() -> String {
+    if let Ok(addr) = std::env::var("POLYSONG_BACKEND_ADDR") {
+        let trimmed = addr.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+
+    let port = std::env::var("POLYSONG_BACKEND_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(4777);
+    format!("127.0.0.1:{port}")
+}
+
 fn start_http_backend(backend: Arc<AppState>) {
     std::thread::spawn(move || {
         if let Err(error) = serve_http_backend(backend) {
@@ -565,9 +580,11 @@ fn start_http_backend(backend: Arc<AppState>) {
 }
 
 fn serve_http_backend(backend: Arc<AppState>) -> Result<(), String> {
-    let server = tiny_http::Server::http("127.0.0.1:4777").map_err(to_string)?;
+    let bind_addr = backend_bind_addr();
+    let server = tiny_http::Server::http(&bind_addr).map_err(to_string)?;
     println!(
-        "Polysong backend listening on http://127.0.0.1:4777 with data at {}",
+        "Polysong backend listening on http://{} with data at {}",
+        bind_addr,
         backend.data_dir.display()
     );
 
@@ -1267,7 +1284,7 @@ fn enrich_youtube_metadata(candidate: &mut IngestCandidate, data_dir: &Path) {
 }
 
 fn enrich_local_metadata(candidate: &mut IngestCandidate, input: &Path, data_dir: &Path) {
-    if let Some(ffprobe) = find_executable("ffprobe").or_else(|| find_executable("ffprobe.exe")) {
+    if let Some(ffprobe) = find_tool(data_dir, &["ffprobe.exe", "ffprobe"]) {
         let output = hidden_command(ffprobe)
             .arg("-v")
             .arg("quiet")
@@ -1302,7 +1319,7 @@ fn enrich_local_metadata(candidate: &mut IngestCandidate, input: &Path, data_dir
 }
 
 fn extract_local_cover(candidate: &mut IngestCandidate, input: &Path, data_dir: &Path) {
-    let Some(ffmpeg) = find_executable("ffmpeg").or_else(|| find_executable("ffmpeg.exe")) else {
+    let Some(ffmpeg) = find_tool(data_dir, &["ffmpeg.exe", "ffmpeg"]) else {
         return;
     };
     let cover_rel = cover_relative_path(candidate, "jpg");
@@ -1420,7 +1437,7 @@ impl YtDlpRunner {
 }
 
 fn ensure_yt_dlp(data_dir: &Path) -> Result<YtDlpRunner, String> {
-    if let Some(path) = find_executable("yt-dlp").or_else(|| find_executable("yt-dlp.exe")) {
+    if let Some(path) = find_tool(data_dir, &["yt-dlp.exe", "yt-dlp"]) {
         return Ok(YtDlpRunner::Binary(path));
     }
 
@@ -1452,6 +1469,32 @@ fn ensure_yt_dlp(data_dir: &Path) -> Result<YtDlpRunner, String> {
     }
 
     Ok(YtDlpRunner::PythonModule { python, module_dir })
+}
+
+fn find_tool(data_dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    for root in tool_roots(data_dir) {
+        for name in names {
+            let path = root.join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+
+    names.iter().find_map(|name| find_executable(name))
+}
+
+fn tool_roots(data_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![data_dir.join("tools")];
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let exe_tools = exe_dir.join("tools");
+            if !roots.iter().any(|root| root == &exe_tools) {
+                roots.push(exe_tools);
+            }
+        }
+    }
+    roots
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {

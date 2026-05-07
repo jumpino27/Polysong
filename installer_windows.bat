@@ -12,6 +12,7 @@ set "TAURI_CLI=%PROJECT_DIR%\frontend\node_modules\.bin\tauri.cmd"
 set "NSIS_DIR=%PROJECT_DIR%\target\release\bundle\nsis"
 set "DIST_DIR=%PROJECT_DIR%\dist"
 set "INSTALLER_OUT=%DIST_DIR%\installed.exe"
+set "INSTALLER_TOOLS_DIR=%PROJECT_DIR%\src-tauri\installer-tools\windows"
 
 cd /d "%PROJECT_DIR%" || exit /b 1
 
@@ -41,6 +42,10 @@ if errorlevel 1 (
 )
 
 echo.
+echo == Preparing bundled Windows helper tools ==
+call :prepare_installer_tools || exit /b 1
+
+echo.
 echo == Building Polysong Windows installer ==
 powershell -NoProfile -ExecutionPolicy Bypass -Command "& $env:TAURI_CLI build --bundles nsis --no-sign; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
@@ -61,9 +66,21 @@ if not defined GENERATED_INSTALLER (
 
 copy /Y "%GENERATED_INSTALLER%" "%INSTALLER_OUT%" >nul || exit /b 1
 
+call :sign_installer || exit /b 1
+
 echo.
 echo Installer created:
 echo "%INSTALLER_OUT%"
 echo.
-echo The installer installs the Tauri desktop app, lets the installer checkbox control the desktop shortcut, and initializes songs folders beside the installed executable.
+echo The installer installs the Tauri desktop app, bundled yt-dlp, bundled ffmpeg/ffprobe, and initializes songs folders beside the installed executable.
+exit /b 0
+
+:prepare_installer_tools
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\prepare_installer_tools.ps1"
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:sign_installer
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\sign_installer.ps1"
+if errorlevel 1 exit /b 1
 exit /b 0
