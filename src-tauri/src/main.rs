@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use polysong_core::{
     AppSettings, AudioSource, IngestCandidate, IngestJob, IngestRequest, Playlist, SettingsPatch,
     Track, TrackFilter, TrackId, TrackPatch,
@@ -8,6 +10,7 @@ use polysong_source_local::LocalSource;
 use polysong_source_suno::SunoSource;
 use polysong_source_youtube::YoutubeSource;
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -63,14 +66,130 @@ impl AppState {
     }
 
     fn delete_track(&self, id: TrackId) -> Result<(), String> {
-        self.repo
+        let paths = self
+            .repo
             .lock()
             .map_err(lock_err)?
             .delete_track(id)
+            .map_err(to_string)?;
+        // Best-effort delete the audio file and cover image from disk so the
+        // user's library and the actual songs/ folder stay in sync. Errors
+        // are intentionally swallowed — a missing file (already deleted by
+        // the user, or never written for a failed import) shouldn't block
+        // the DB delete that has already succeeded.
+        if let Some(rel) = paths.file_path {
+            let abs = self
+                .data_dir
+                .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = std::fs::remove_file(&abs);
+        }
+        if let Some(rel) = paths.cover_path {
+            let abs = self
+                .data_dir
+                .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = std::fs::remove_file(&abs);
+        }
+        Ok(())
+    }
+
+    fn add_track_to_playlist(
+        &self,
+        playlist_id: polysong_core::PlaylistId,
+        track_id: TrackId,
+    ) -> Result<(), String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .add_track_to_playlist(playlist_id, track_id)
             .map_err(to_string)
     }
 
+    fn remove_track_from_playlist(
+        &self,
+        playlist_id: polysong_core::PlaylistId,
+        track_id: TrackId,
+    ) -> Result<(), String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .remove_track_from_playlist(playlist_id, track_id)
+            .map_err(to_string)
+    }
+
+    fn list_track_playlists(
+        &self,
+        track_id: TrackId,
+    ) -> Result<Vec<polysong_core::PlaylistId>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .list_track_playlists(track_id)
+            .map_err(to_string)
+    }
+
+    fn list_playlist_members(
+        &self,
+        playlist_id: polysong_core::PlaylistId,
+    ) -> Result<Vec<TrackId>, String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .list_playlist_members(playlist_id)
+            .map_err(to_string)
+    }
+
+    fn set_track_playlists(
+        &self,
+        track_id: TrackId,
+        playlist_ids: Vec<polysong_core::PlaylistId>,
+    ) -> Result<(), String> {
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .set_track_playlists(track_id, playlist_ids)
+            .map_err(to_string)
+    }
+
+    fn attach_to_requested_playlist(
+        &self,
+        request: &IngestRequest,
+        track_id: TrackId,
+    ) -> Result<(), String> {
+        if let Some(playlist_id) = request.playlist_id {
+            self.repo
+                .lock()
+                .map_err(lock_err)?
+                .add_track_to_playlist(playlist_id, track_id)
+                .map_err(to_string)?;
+        }
+        Ok(())
+    }
+
     fn ingest_url(&self, request: IngestRequest) -> Result<i64, String> {
+        // Dedup: if a track with this exact source URL already exists, skip
+        // the network/registry step entirely and just record a completed job
+        // for the existing track. This keeps re-ingesting the same Suno or
+        // YouTube URL fast and avoids creating duplicate library rows.
+        if !request.input.trim().is_empty() {
+            if let Ok(repo) = self.repo.lock() {
+                if let Ok(Some(existing_id)) = repo.find_track_by_source_url(&request.input) {
+                    drop(repo);
+                    let job_id = self
+                        .repo
+                        .lock()
+                        .map_err(lock_err)?
+                        .queue_ingest(&request)
+                        .map_err(to_string)?;
+                    let _ = self
+                        .repo
+                        .lock()
+                        .map_err(lock_err)?
+                        .complete_job(job_id, existing_id);
+                    self.attach_to_requested_playlist(&request, existing_id)?;
+                    return Ok(job_id);
+                }
+            }
+        }
         let job_id = self
             .repo
             .lock()
@@ -89,6 +208,7 @@ impl AppState {
                             .map_err(lock_err)?
                             .insert_candidate(candidate)
                             .map_err(to_string)?;
+                        self.attach_to_requested_playlist(&request, track_id)?;
                         first_track_id.get_or_insert(track_id);
                     }
                     let repo = self.repo.lock().map_err(lock_err)?;
@@ -160,7 +280,12 @@ impl AppState {
             .map_err(to_string)
     }
 
-    fn upload_local(&self, filename: String, bytes: Vec<u8>) -> Result<i64, String> {
+    fn upload_local(
+        &self,
+        filename: String,
+        bytes: Vec<u8>,
+        playlist_id: Option<polysong_core::PlaylistId>,
+    ) -> Result<i64, String> {
         if bytes.len() < 1024 {
             return Err("uploaded audio was too small".to_owned());
         }
@@ -182,6 +307,7 @@ impl AppState {
             input: file_name.clone(),
             advanced_public_suno: false,
             consent_accepted: true,
+            playlist_id,
         };
         let job_id = self
             .repo
@@ -228,6 +354,7 @@ impl AppState {
             .map_err(lock_err)?
             .insert_candidate(candidate)
             .map_err(to_string)?;
+        self.attach_to_requested_playlist(&request, track_id)?;
         self.repo
             .lock()
             .map_err(lock_err)?
@@ -298,6 +425,49 @@ fn update_settings(
     state.update_settings(patch)
 }
 
+#[tauri::command]
+fn add_track_to_playlist(
+    state: State<Arc<AppState>>,
+    playlist_id: polysong_core::PlaylistId,
+    track_id: TrackId,
+) -> Result<(), String> {
+    state.add_track_to_playlist(playlist_id, track_id)
+}
+
+#[tauri::command]
+fn remove_track_from_playlist(
+    state: State<Arc<AppState>>,
+    playlist_id: polysong_core::PlaylistId,
+    track_id: TrackId,
+) -> Result<(), String> {
+    state.remove_track_from_playlist(playlist_id, track_id)
+}
+
+#[tauri::command]
+fn list_track_playlists(
+    state: State<Arc<AppState>>,
+    track_id: TrackId,
+) -> Result<Vec<polysong_core::PlaylistId>, String> {
+    state.list_track_playlists(track_id)
+}
+
+#[tauri::command]
+fn list_playlist_members(
+    state: State<Arc<AppState>>,
+    playlist_id: polysong_core::PlaylistId,
+) -> Result<Vec<TrackId>, String> {
+    state.list_playlist_members(playlist_id)
+}
+
+#[tauri::command]
+fn set_track_playlists(
+    state: State<Arc<AppState>>,
+    track_id: TrackId,
+    playlist_ids: Vec<polysong_core::PlaylistId>,
+) -> Result<(), String> {
+    state.set_track_playlists(track_id, playlist_ids)
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
@@ -307,6 +477,9 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .register_uri_scheme_protocol("polysong", |_ctx, request| {
+            polysong_media_scheme_response(request)
+        })
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = polysong_data_dir()
@@ -329,7 +502,12 @@ fn main() {
             list_playlists,
             create_playlist,
             get_settings,
-            update_settings
+            update_settings,
+            add_track_to_playlist,
+            remove_track_from_playlist,
+            list_track_playlists,
+            set_track_playlists,
+            list_playlist_members
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Polysong");
@@ -341,6 +519,35 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> String {
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    hide_subprocess_window(&mut command);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn hide_subprocess_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_subprocess_window(_: &mut Command) {}
+
+fn scheme_response(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header(tauri::http::header::CONTENT_TYPE, content_type)
+        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(body)
+        .expect("valid scheme response")
 }
 
 fn run_http_backend() -> Result<(), String> {
@@ -402,9 +609,12 @@ fn handle_http_request(
             let filename = query_value(path, "filename")
                 .and_then(percent_decode)
                 .ok_or_else(|| "upload_local requires a filename query parameter".to_owned());
+            let playlist_id = query_value(path, "playlistId").and_then(|value| value.parse().ok());
             filename
                 .and_then(|filename| read_body_bytes(request).map(|bytes| (filename, bytes)))
-                .and_then(|(filename, bytes)| to_json(backend.upload_local(filename, bytes)))
+                .and_then(|(filename, bytes)| {
+                    to_json(backend.upload_local(filename, bytes, playlist_id))
+                })
         }
         (&tiny_http::Method::Post, "/api/list_ingest_jobs") => to_json(backend.list_ingest_jobs()),
         (&tiny_http::Method::Post, "/api/list_playlists") => to_json(backend.list_playlists()),
@@ -416,6 +626,27 @@ fn handle_http_request(
         (&tiny_http::Method::Post, "/api/update_settings") => {
             parse_body::<UpdateSettingsBody>(request)
                 .and_then(|body| to_json(backend.update_settings(body.patch)))
+        }
+        (&tiny_http::Method::Post, "/api/add_track_to_playlist") => {
+            parse_body::<PlaylistMembershipBody>(request).and_then(|body| {
+                to_json(backend.add_track_to_playlist(body.playlist_id, body.track_id))
+            })
+        }
+        (&tiny_http::Method::Post, "/api/remove_track_from_playlist") => {
+            parse_body::<PlaylistMembershipBody>(request).and_then(|body| {
+                to_json(backend.remove_track_from_playlist(body.playlist_id, body.track_id))
+            })
+        }
+        (&tiny_http::Method::Post, "/api/list_track_playlists") => parse_body::<TrackIdBody>(request)
+            .and_then(|body| to_json(backend.list_track_playlists(body.track_id))),
+        (&tiny_http::Method::Post, "/api/set_track_playlists") => {
+            parse_body::<SetTrackPlaylistsBody>(request).and_then(|body| {
+                to_json(backend.set_track_playlists(body.track_id, body.playlist_ids))
+            })
+        }
+        (&tiny_http::Method::Post, "/api/list_playlist_members") => {
+            parse_body::<PlaylistIdBody>(request)
+                .and_then(|body| to_json(backend.list_playlist_members(body.playlist_id)))
         }
         _ => Err(format!(
             "unknown route: {} {}",
@@ -552,6 +783,70 @@ fn media_response(
     response
 }
 
+fn polysong_media_scheme_response(
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let path = request.uri().path();
+    let Some(encoded_path) = path.strip_prefix("/media/") else {
+        return scheme_response(404, b"not found".to_vec(), "text/plain");
+    };
+    let Some(relative_path) = percent_decode(encoded_path) else {
+        return scheme_response(400, b"invalid media path".to_vec(), "text/plain");
+    };
+    let Ok(data_dir) = polysong_data_dir() else {
+        return scheme_response(500, b"data dir unavailable".to_vec(), "text/plain");
+    };
+    let Ok(path) = safe_data_path(&data_dir, &relative_path) else {
+        return scheme_response(403, b"invalid media path".to_vec(), "text/plain");
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return scheme_response(404, b"media not found".to_vec(), "text/plain");
+    };
+
+    let total = bytes.len() as u64;
+    let content_type = media_content_type(&path);
+    let range_header = request
+        .headers()
+        .get(tauri::http::header::RANGE)
+        .and_then(|value| value.to_str().ok());
+
+    if let Some(range_header) = range_header {
+        if let Some((start, end)) = parse_byte_range(range_header, total) {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            return scheme_media_response(
+                206,
+                slice,
+                content_type,
+                Some(format!("bytes {}-{}/{}", start, end, total)),
+            );
+        }
+    }
+
+    scheme_media_response(200, bytes, content_type, None)
+}
+
+fn scheme_media_response(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+    content_range: Option<String>,
+) -> tauri::http::Response<Vec<u8>> {
+    let mut builder = tauri::http::Response::builder()
+        .status(status)
+        .header(tauri::http::header::CONTENT_TYPE, content_type)
+        .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            tauri::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "content-range, accept-ranges, content-length",
+        );
+    if let Some(content_range) = content_range {
+        builder = builder.header(tauri::http::header::CONTENT_RANGE, content_range);
+    }
+    builder.body(body).expect("valid media scheme response")
+}
+
 /// Parse a byte-range spec like `bytes=START-END`, `bytes=START-`, or
 /// `bytes=-N` (suffix). Single ranges only — multipart ranges are not
 /// supported here. Returns inclusive (start, end) bounded to `[0, total - 1]`.
@@ -596,8 +891,8 @@ fn http_response(
     for (name, value) in [
         ("Content-Type", content_type),
         ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "POST, OPTIONS"),
-        ("Access-Control-Allow-Headers", "content-type"),
+        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+        ("Access-Control-Allow-Headers", "content-type, range"),
         ("Access-Control-Allow-Private-Network", "true"),
     ] {
         response.add_header(
@@ -616,6 +911,14 @@ fn polysong_data_dir() -> Result<PathBuf, String> {
     if let Ok(current_dir) = std::env::current_dir() {
         if current_dir.join("package.json").exists() && current_dir.join("src-tauri").is_dir() {
             return Ok(current_dir);
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                return Ok(exe_dir.to_path_buf());
+            }
         }
     }
 
@@ -798,6 +1101,32 @@ struct UpdateSettingsBody {
     patch: SettingsPatch,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistMembershipBody {
+    playlist_id: polysong_core::PlaylistId,
+    track_id: TrackId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackIdBody {
+    track_id: TrackId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetTrackPlaylistsBody {
+    track_id: TrackId,
+    playlist_ids: Vec<polysong_core::PlaylistId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistIdBody {
+    playlist_id: polysong_core::PlaylistId,
+}
+
 fn materialize_candidate(data_dir: &Path, candidate: &mut IngestCandidate) -> Result<(), String> {
     let destination = data_dir.join(
         candidate
@@ -939,7 +1268,7 @@ fn enrich_youtube_metadata(candidate: &mut IngestCandidate, data_dir: &Path) {
 
 fn enrich_local_metadata(candidate: &mut IngestCandidate, input: &Path, data_dir: &Path) {
     if let Some(ffprobe) = find_executable("ffprobe").or_else(|| find_executable("ffprobe.exe")) {
-        let output = Command::new(ffprobe)
+        let output = hidden_command(ffprobe)
             .arg("-v")
             .arg("quiet")
             .arg("-print_format")
@@ -981,7 +1310,7 @@ fn extract_local_cover(candidate: &mut IngestCandidate, input: &Path, data_dir: 
     if let Some(parent) = cover_abs.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let status = Command::new(ffmpeg)
+    let status = hidden_command(ffmpeg)
         .arg("-y")
         .arg("-i")
         .arg(input)
@@ -1077,9 +1406,9 @@ enum YtDlpRunner {
 impl YtDlpRunner {
     fn command(&self) -> Command {
         match self {
-            YtDlpRunner::Binary(path) => Command::new(path),
+            YtDlpRunner::Binary(path) => hidden_command(path),
             YtDlpRunner::PythonModule { python, module_dir } => {
-                let mut command = Command::new(python);
+                let mut command = hidden_command(python);
                 command
                     .arg("-m")
                     .arg("yt_dlp")
@@ -1106,7 +1435,7 @@ fn ensure_yt_dlp(data_dir: &Path) -> Result<YtDlpRunner, String> {
 
     if !module_marker.exists() {
         std::fs::create_dir_all(&module_dir).map_err(to_string)?;
-        let status = Command::new(&python)
+        let status = hidden_command(&python)
             .arg("-m")
             .arg("pip")
             .arg("install")

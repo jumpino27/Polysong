@@ -77,6 +77,7 @@ pub struct TrackFilter {
     pub source: Option<AudioSource>,
     pub search: Option<String>,
     pub favorites_only: bool,
+    pub playlist_id: Option<PlaylistId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +98,7 @@ pub struct IngestRequest {
     pub input: String,
     pub advanced_public_suno: bool,
     pub consent_accepted: bool,
+    pub playlist_id: Option<PlaylistId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

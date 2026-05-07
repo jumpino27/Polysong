@@ -1,36 +1,143 @@
 # Polysong
 
-Polysong is a local-first desktop music library scaffold built with Tauri 2, Rust, SQLite, React, and the Web Audio API. It unifies local files, YouTube URLs, and Suno songs into one library with playlists, ingest jobs, light/dark themes, and a full-window visualizer.
+Polysong is a local-first music library for songs you own or have the right to keep locally. It can organize local audio files, your Suno generations, and YouTube audio you are allowed to download.
 
-Imported audio is assigned under the app data folder as `songs/suno/`, `songs/youtube/`, or `songs/local/`. Cover images are saved under `songs/covers/`. The database is created empty; it does not seed demo tracks.
+Everything stays on your machine. Songs, covers, and the SQLite database are stored locally.
 
-Ingest behavior in this scaffold:
+Support the creator for more content: revolut.me/jumpino
 
-- Local paths are copied into `songs/local/`; `ffprobe` is used for title/artist/album/duration when available, and `ffmpeg` attempts to extract embedded cover art.
-- YouTube URLs are normalized to a single video id and downloaded with `--no-playlist` so radio/list parameters do not accidentally expand. Metadata and thumbnails come from `yt-dlp`; if `yt-dlp` is not on `PATH`, Polysong bootstraps a local Python module copy under the app data `tools/yt-dlp/` folder when Python is available.
-- Suno `/song/{id}`, `/s/{short}`, and `/playlist/{id}` URLs are supported. Short links resolve through Suno redirect, playlists expand through Suno's public playlist API, and tracks download audio plus cover art from the returned metadata.
+## What It Does
 
-## Run
+- Import songs from local files, Suno, or YouTube.
+- Store audio in source folders: `songs/local`, `songs/suno`, and `songs/youtube`.
+- Store cover images in `songs/covers`.
+- Keep the library database in `polysong.db`.
+- Play tracks with queue, seek bar, volume, shuffle, repeat, and fullscreen visualizers.
+- Use playlists without copying songs. A song can be in many playlists while the file stays in its source folder.
 
-```powershell
-pnpm install
-pnpm build
-cargo check --workspace
-pnpm tauri:dev
+## Screenshots
+
+| Library | Ingest |
+| --- | --- |
+| ![Library](frontend/public/ss2.png) | ![Ingest](frontend/public/ss4.png) |
+
+| Player | Fullscreen |
+| --- | --- |
+| ![Player](frontend/public/ss3.png) | ![Fullscreen visualizer](frontend/public/ss1.png) |
+
+## Install On Windows
+
+The easiest way to use Polysong on Windows is the installer:
+
+```bat
+installer_windows.bat
 ```
 
-The browser development fallback also works without the Tauri shell:
+This builds:
 
-```powershell
-pnpm dev
+```text
+dist/installed.exe
 ```
 
-## Legal and ethical notes
+Run `dist/installed.exe` to install Polysong.
 
-Polysong is for content you own or have the right to download and keep locally.
+The installer lets you choose the install directory. After installation, Polysong keeps its data beside the installed app:
 
-- Local files are imported from user-selected paths.
-- Suno ingestion is intended for the signed-in user's own generated songs. Public Suno URL import should remain behind an advanced consent toggle.
-- YouTube ingestion is for content the user has rights to download, such as their own uploads, Creative Commons material, public-domain recordings, or cases allowed by local law.
+```text
+Polysong/
+  polysong-app.exe
+  polysong.db
+  songs/
+    local/
+    suno/
+    youtube/
+    covers/
+```
 
-The app surfaces this guidance in onboarding and source-specific ingest UI. Backend source modules keep public/Suno advanced behavior explicit rather than silent.
+If you install to the default Windows user location, this is usually:
+
+```text
+C:\Users\<you>\AppData\Local\Polysong
+```
+
+## Run From The Codebase
+
+Use these scripts when you want to run Polysong locally from the source code instead of installing it.
+
+### Windows
+
+First setup:
+
+```bat
+first_setup_no_exe.bat
+```
+
+Start the local backend and browser frontend:
+
+```bat
+start_no_exe.bat
+```
+
+### Linux And macOS
+
+First setup:
+
+```sh
+./first_setup_no_exe.sh
+```
+
+Start the local backend and browser frontend:
+
+```sh
+./start_no_exe.sh
+```
+
+These scripts are only for local development/testing. They do not build an installer.
+
+## What The Scripts Do
+
+| Script | Platform | What it does |
+| --- | --- | --- |
+| `first_setup_no_exe.bat` | Windows | Installs/checks local project tools, installs frontend dependencies, checks Rust/Cargo, builds what is needed, and creates `start_no_exe.bat`. |
+| `start_no_exe.bat` | Windows | Starts the Rust backend and the browser frontend for local source-code use. |
+| `first_setup_no_exe.sh` | Linux/macOS | Same idea as the Windows setup script, but for Unix-like systems. |
+| `start_no_exe.sh` | Linux/macOS | Starts the local backend and browser frontend. |
+| `installer_windows.bat` | Windows | Builds the Windows installer and writes it to `dist/installed.exe`. |
+
+## Developer Commands
+
+If you prefer package commands:
+
+| Command | What it does |
+| --- | --- |
+| `pnpm install` | Install frontend dependencies. |
+| `pnpm dev` | Run backend and frontend together for browser development. |
+| `pnpm dev:frontend` | Run only the Vite frontend. |
+| `pnpm dev:backend` | Run only the Rust backend on `127.0.0.1:4777`. |
+| `pnpm build` | Build the frontend. |
+| `pnpm tauri:dev` | Run the Tauri desktop app in development mode. |
+| `pnpm tauri:build` | Build the Tauri app. |
+| `pnpm check:rust` | Run `cargo check --workspace`. |
+
+## Requirements
+
+The setup scripts try to keep tools local to this project where possible. If you install things manually, you need:
+
+- Node.js and pnpm
+- Rust and Cargo
+- Python 3 or `yt-dlp` for YouTube imports
+- `ffmpeg` and `ffprobe` for local-file metadata and cover extraction
+
+## Privacy And Rights
+
+Polysong is for content you own or have permission to keep locally.
+
+- Local files are copied from files you choose.
+- Suno imports are intended for your own generations.
+- YouTube imports require you to confirm you have the right to download the audio.
+
+Polysong does not upload your songs or host media for other people. It is a local downloader, local organizer, and local player.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

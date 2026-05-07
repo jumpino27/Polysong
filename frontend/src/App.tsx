@@ -43,6 +43,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 import { Button } from './components/Button'
+import { AddToPlaylistDialog } from './components/AddToPlaylistDialog'
 import { Modal } from './components/Modal'
 import { Select } from './components/Select'
 import { TrackRow } from './components/TrackRow'
@@ -92,6 +93,7 @@ function App() {
   const [ingestOpen, setIngestOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [createPlaylistOpen, setCreatePlaylistOpen] = useState(false)
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null)
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('cover')
   const [fullscreen, setFullscreen] = useState(false)
   const [overlayVisible, setOverlayVisible] = useState(true)
@@ -107,6 +109,7 @@ function App() {
   const [queueScope, setQueueScope] = useState<PlaybackScope | null>(null)
   const [queueTracks, setQueueTracks] = useState<Track[]>([])
   const [activePlaylistId, setActivePlaylistId] = useState<number | null>(null)
+  const [activePlaylistMembers, setActivePlaylistMembers] = useState<Set<number> | null>(null)
 
   const seekingRef = useRef(false)
 
@@ -115,6 +118,7 @@ function App() {
       source: source === 'all' ? null : source,
       search: search || null,
       favoritesOnly,
+      playlistId: activePlaylistId,
     }
     const libraryFilter: TrackFilter = {
       source: null,
@@ -132,6 +136,9 @@ function App() {
     const filtered = nextTracks.filter((track) => {
       if (filter.source && track.source !== filter.source) return false
       if (filter.favoritesOnly && !track.favorite) return false
+      if (filter.playlistId != null && activePlaylistMembers && !activePlaylistMembers.has(track.id)) {
+        return false
+      }
       if (filter.search) {
         const needle = filter.search.toLowerCase()
         const haystack = [track.title, track.artist, track.album, track.styleDescription]
@@ -149,7 +156,7 @@ function App() {
     setActiveJobs(nextJobs.filter((job) => job.status === 'queued' || job.status === 'downloading'))
     setSettings(nextSettings)
     setActiveTrack((current) => current ?? filtered[0] ?? null)
-  }, [favoritesOnly, search, source])
+  }, [favoritesOnly, search, source, activePlaylistId, activePlaylistMembers])
 
   useEffect(() => {
     const handle = window.setTimeout(() => void refresh(), 0)
@@ -187,6 +194,28 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme
   }, [settings.theme])
+
+  // Pull the membership for the active playlist so we can client-side filter
+  // the visible track list to that playlist's contents — works even if the
+  // backend hasn't been rebuilt with the new playlistId-aware list_tracks.
+  useEffect(() => {
+    if (activePlaylistId == null) {
+      setActivePlaylistMembers(null)
+      return
+    }
+    let cancelled = false
+    void api
+      .listPlaylistMembers(activePlaylistId)
+      .then((ids) => {
+        if (!cancelled) setActivePlaylistMembers(new Set(ids))
+      })
+      .catch(() => {
+        if (!cancelled) setActivePlaylistMembers(new Set())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activePlaylistId, playlists])
 
   useEffect(() => {
     if (!fullscreen) return
@@ -330,6 +359,24 @@ function App() {
     setSettings(next)
   }
 
+  const handleTrackDelete = async (track: Track) => {
+    if (activePlaylistId != null) {
+      await api.removeTrackFromPlaylist(track.id, activePlaylistId)
+      setActivePlaylistMembers((current) => {
+        if (!current) return current
+        const next = new Set(current)
+        next.delete(track.id)
+        return next
+      })
+    } else {
+      await api.deleteTrack(track.id)
+      if (activeTrack?.id === track.id) {
+        setActiveTrack(null)
+      }
+    }
+    await refresh()
+  }
+
   const renderVisualizer = () => {
     if (visualizerMode === 'waveform') return <WaveformVisualizer />
     if (visualizerMode === 'bars') return <BarsVisualizer compact={!fullscreen} />
@@ -446,6 +493,15 @@ function App() {
           <div className="brand-name">
             <strong>Polysong</strong>
             <span>local-first lab</span>
+            <a
+              className="support-creator-link"
+              href="https://revolut.me/jumpino"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span>Support Creator</span>
+              <small>Free and open source</small>
+            </a>
           </div>
         </div>
 
@@ -596,7 +652,9 @@ function App() {
               onPlay={() => void selectAndPlay(track)}
               onToggleFavorite={() => void api.updateTrackMetadata(track.id, { favorite: !track.favorite }).then(refresh)}
               onToggleExpanded={() => setExpandedTrack((current) => (current === track.id ? null : track.id))}
-              onDelete={() => void api.deleteTrack(track.id).then(refresh)}
+              onDelete={() => void handleTrackDelete(track)}
+              deleteLabel={activePlaylistId != null ? 'Remove from playlist' : 'Delete track'}
+              onAddToPlaylist={() => setAddToPlaylistTrack(track)}
             />
           ))}
         </section>
@@ -771,6 +829,7 @@ function App() {
       <IngestDialog
         open={ingestOpen}
         settings={settings}
+        activePlaylistId={activePlaylistId}
         onClose={() => setIngestOpen(false)}
         onSettings={updateSettings}
         onQueued={() => {
@@ -785,6 +844,15 @@ function App() {
         onCreate={async (name) => {
           await api.createPlaylist(name)
           setCreatePlaylistOpen(false)
+          await refresh()
+        }}
+      />
+      <AddToPlaylistDialog
+        open={addToPlaylistTrack !== null}
+        track={addToPlaylistTrack}
+        playlists={playlists}
+        onClose={() => setAddToPlaylistTrack(null)}
+        onSaved={async () => {
           await refresh()
         }}
       />
@@ -880,12 +948,14 @@ function CreatePlaylistDialog({
 function IngestDialog({
   open,
   settings,
+  activePlaylistId,
   onClose,
   onSettings,
   onQueued,
 }: {
   open: boolean
   settings: AppSettings
+  activePlaylistId: number | null
   onClose: () => void
   onSettings: (patch: Partial<AppSettings>) => Promise<void>
   onQueued: () => void
@@ -913,7 +983,7 @@ function IngestDialog({
     try {
       if (source === 'local') {
         if (!file) return
-        await api.uploadLocal(file)
+        await api.uploadLocal(file, activePlaylistId)
         onQueued()
         return
       }
@@ -923,6 +993,7 @@ function IngestDialog({
         input,
         advancedPublicSuno: settings.sunoAdvancedEnabled,
         consentAccepted: source === 'youtube' ? settings.youtubeConsent : source === 'suno' ? settings.sunoAdvancedEnabled : true,
+        playlistId: activePlaylistId,
       })
       onQueued()
     } finally {

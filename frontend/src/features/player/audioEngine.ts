@@ -214,6 +214,21 @@ class AudioEngine {
       this.currentBlobUrl = null
     }
 
+    if (url.startsWith('http://polysong.localhost/')) {
+      this.audio.src = url
+      this.isLoading = false
+      this.notify()
+      if (loadId === this.currentLoadId && this.playOnReady) {
+        this.playOnReady = false
+        try {
+          await this.play()
+        } catch {
+          /* ignore */
+        }
+      }
+      return
+    }
+
     try {
       const response = await fetch(url)
       if (!response.ok) throw new Error(`fetch failed: ${response.status}`)

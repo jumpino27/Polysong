@@ -1,4 +1,4 @@
-import { Heart, Music2, Play, Sparkles, Trash2 } from 'lucide-react'
+import { Heart, ListPlus, Music2, Play, Sparkles, Trash2 } from 'lucide-react'
 import type { Track } from '../types'
 import { formatDuration, sourceLabel } from '../lib/format'
 import { mediaUrl } from '../lib/tauri'
@@ -12,6 +12,8 @@ export function TrackRow({
   onToggleFavorite,
   onToggleExpanded,
   onDelete,
+  deleteLabel = 'Delete track',
+  onAddToPlaylist,
 }: {
   track: Track
   active: boolean
@@ -20,6 +22,8 @@ export function TrackRow({
   onToggleFavorite: () => void
   onToggleExpanded: () => void
   onDelete: () => void
+  deleteLabel?: string
+  onAddToPlaylist: () => void
 }) {
   const showStyleChip = Boolean(track.styleDescription)
   const coverUrl = mediaUrl(track.coverPath)
@@ -64,11 +68,16 @@ export function TrackRow({
 
         <div className="track-actions">
           <Button
+            icon={<ListPlus size={15} />}
+            aria-label="Add to playlist"
+            onClick={onAddToPlaylist}
+          />
+          <Button
             icon={<Heart size={15} fill={track.favorite ? 'currentColor' : 'none'} />}
             aria-label={track.favorite ? 'Remove favorite' : 'Add favorite'}
             onClick={onToggleFavorite}
           />
-          <Button icon={<Trash2 size={15} />} variant="quiet" aria-label="Delete track" onClick={onDelete} />
+          <Button icon={<Trash2 size={15} />} variant="quiet" aria-label={deleteLabel} onClick={onDelete} />
         </div>
       </div>
 

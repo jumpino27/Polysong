@@ -10,13 +10,18 @@ import type {
   TrackPatch,
 } from '../types'
 import {
+  mockAddTrackToPlaylist,
   mockCreatePlaylist,
   mockDeleteTrack,
   mockGetSettings,
   mockIngest,
   mockListJobs,
+  mockListPlaylistMembers,
   mockListPlaylists,
+  mockListTrackPlaylists,
   mockListTracks,
+  mockRemoveTrackFromPlaylist,
+  mockSetTrackPlaylists,
   mockUpdateSettings,
   mockUpdateTrack,
 } from './mock'
@@ -25,20 +30,53 @@ const hasTauri = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).
 const backendUrl = 'http://127.0.0.1:4777/api'
 const mediaBaseUrl = 'http://127.0.0.1:4777/media'
 
-async function call<T>(command: string, args: Record<string, unknown>, fallback: () => Promise<T>) {
-  if (hasTauri) return invoke<T>(command, args)
+async function callHttp<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`${backendUrl}/${command}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `Backend returned ${response.status}`)
+  }
+  return (await response.json()) as T
+}
 
-  try {
-    const response = await fetch(`${backendUrl}/${command}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(args),
-    })
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null
-      throw new Error(body?.error ?? `Backend returned ${response.status}`)
+/**
+ * Call the backend, with graceful degradation.
+ *
+ * - Tauri mode: try `invoke()` first. If it throws (e.g. an old build that
+ *   doesn't have a freshly-added command registered yet), fall back to the
+ *   embedded HTTP backend served by the same binary — it often has the route
+ *   even when the Tauri handler list is stale. If both fail, propagate the
+ *   error so callers can surface it.
+ * - Browser preview: try the HTTP backend, then the in-browser mock.
+ */
+async function call<T>(
+  command: string,
+  args: Record<string, unknown>,
+  fallback: () => Promise<T>,
+): Promise<T> {
+  if (hasTauri) {
+    try {
+      return await invoke<T>(command, args)
+    } catch (tauriError) {
+      try {
+        return await callHttp<T>(command, args)
+      } catch (httpError) {
+        console.warn(
+          `Polysong: ${command} failed via both Tauri and HTTP. Tauri error:`,
+          tauriError,
+          'HTTP error:',
+          httpError,
+        )
+        throw tauriError instanceof Error ? tauriError : new Error(String(tauriError))
+      }
     }
-    return (await response.json()) as T
+  }
+  try {
+    return await callHttp<T>(command, args)
   } catch (error) {
     console.warn(`Polysong backend unavailable for ${command}; using browser preview fallback.`, error)
     return fallback()
@@ -54,9 +92,11 @@ export const api = {
   createPlaylist: (name: string, description?: string | null) =>
     call<Playlist>('create_playlist', { name, description }, () => mockCreatePlaylist(name, description)),
   ingestUrl: (request: IngestRequest) => call<number>('ingest_url', { request }, () => mockIngest(request)),
-  uploadLocal: async (file: File) => {
+  uploadLocal: async (file: File, playlistId?: number | null) => {
     try {
-      const response = await fetch(`${backendUrl}/upload_local?filename=${encodeURIComponent(file.name)}`, {
+      const params = new URLSearchParams({ filename: file.name })
+      if (playlistId != null) params.set('playlistId', String(playlistId))
+      const response = await fetch(`${backendUrl}/upload_local?${params.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': file.type || 'application/octet-stream' },
         body: file,
@@ -73,6 +113,7 @@ export const api = {
         input: file.name,
         advancedPublicSuno: false,
         consentAccepted: true,
+        playlistId,
       })
     }
   },
@@ -80,9 +121,29 @@ export const api = {
   getSettings: () => call<AppSettings>('get_settings', {}, mockGetSettings),
   updateSettings: (patch: SettingsPatch) =>
     call<AppSettings>('update_settings', { patch }, () => mockUpdateSettings(patch)),
+  addTrackToPlaylist: (trackId: number, playlistId: number) =>
+    call<void>('add_track_to_playlist', { trackId, playlistId }, () => mockAddTrackToPlaylist(trackId, playlistId)),
+  removeTrackFromPlaylist: (trackId: number, playlistId: number) =>
+    call<void>(
+      'remove_track_from_playlist',
+      { trackId, playlistId },
+      () => mockRemoveTrackFromPlaylist(trackId, playlistId),
+    ),
+  listTrackPlaylists: (trackId: number) =>
+    call<number[]>('list_track_playlists', { trackId }, () => mockListTrackPlaylists(trackId)),
+  setTrackPlaylists: (trackId: number, playlistIds: number[]) =>
+    call<void>('set_track_playlists', { trackId, playlistIds }, () =>
+      mockSetTrackPlaylists(trackId, playlistIds),
+    ),
+  listPlaylistMembers: (playlistId: number) =>
+    call<number[]>('list_playlist_members', { playlistId }, () =>
+      mockListPlaylistMembers(playlistId),
+    ),
 }
 
 export function mediaUrl(path?: string | null) {
   if (!path) return null
-  return `${mediaBaseUrl}/${path.split('/').map(encodeURIComponent).join('/')}`
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/')
+  if (hasTauri) return `http://polysong.localhost/media/${encodedPath}`
+  return `${mediaBaseUrl}/${encodedPath}`
 }

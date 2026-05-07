@@ -1,7 +1,7 @@
 use chrono::Utc;
 use polysong_core::{
     AppSettings, AudioSource, IngestCandidate, IngestJob, IngestRequest, IngestStatus, JobId,
-    Playlist, SettingsPatch, Track, TrackFilter, TrackId, TrackPatch,
+    Playlist, PlaylistId, SettingsPatch, Track, TrackFilter, TrackId, TrackPatch,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::path::Path;
@@ -38,6 +38,16 @@ impl Repository {
         }
         if filter.favorites_only {
             tracks.retain(|track| track.favorite);
+        }
+        if let Some(playlist_id) = filter.playlist_id {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1")?;
+            let in_playlist: std::collections::HashSet<TrackId> = stmt
+                .query_map(params![playlist_id], |row| row.get::<_, TrackId>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            tracks.retain(|track| in_playlist.contains(&track.id));
         }
         if let Some(search) = filter.search.filter(|value| !value.trim().is_empty()) {
             let needle = search.to_ascii_lowercase();
@@ -79,10 +89,117 @@ impl Repository {
         Ok(())
     }
 
-    pub fn delete_track(&self, id: TrackId) -> Result<()> {
+    pub fn delete_track(&self, id: TrackId) -> Result<DeletedTrackPaths> {
+        let paths: Option<(String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT file_path, cover_path FROM tracks WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        self.conn
+            .execute("DELETE FROM playlist_tracks WHERE track_id = ?1", params![id])?;
+        self.conn.execute(
+            "UPDATE ingest_jobs SET track_id = NULL WHERE track_id = ?1",
+            params![id],
+        )?;
         self.conn
             .execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
+        Ok(DeletedTrackPaths {
+            file_path: paths.as_ref().map(|p| p.0.clone()),
+            cover_path: paths.and_then(|p| p.1),
+        })
+    }
+
+    pub fn add_track_to_playlist(
+        &self,
+        playlist_id: PlaylistId,
+        track_id: TrackId,
+    ) -> Result<()> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+            params![playlist_id, track_id],
+            |row| row.get(0),
+        )?;
+        if exists > 0 {
+            return Ok(());
+        }
+        let next_pos: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+            params![playlist_id, track_id, next_pos],
+        )?;
+        self.conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now_ms(), playlist_id],
+        )?;
         Ok(())
+    }
+
+    pub fn remove_track_from_playlist(
+        &self,
+        playlist_id: PlaylistId,
+        track_id: TrackId,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+            params![playlist_id, track_id],
+        )?;
+        self.conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now_ms(), playlist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_track_playlists(&self, track_id: TrackId) -> Result<Vec<PlaylistId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT playlist_id FROM playlist_tracks WHERE track_id = ?1")?;
+        let rows = stmt.query_map(params![track_id], |row| row.get::<_, PlaylistId>(0))?;
+        rows.collect()
+    }
+
+    pub fn list_playlist_members(&self, playlist_id: PlaylistId) -> Result<Vec<TrackId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |row| row.get::<_, TrackId>(0))?;
+        rows.collect()
+    }
+
+    pub fn set_track_playlists(
+        &self,
+        track_id: TrackId,
+        playlist_ids: Vec<PlaylistId>,
+    ) -> Result<()> {
+        let current = self.list_track_playlists(track_id)?;
+        for id in &current {
+            if !playlist_ids.contains(id) {
+                self.remove_track_from_playlist(*id, track_id)?;
+            }
+        }
+        for id in &playlist_ids {
+            if !current.contains(id) {
+                self.add_track_to_playlist(*id, track_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn find_track_by_source_url(&self, url: &str) -> Result<Option<TrackId>> {
+        self.conn
+            .query_row(
+                "SELECT id FROM tracks WHERE source_url = ?1 LIMIT 1",
+                params![url],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn insert_candidate(&self, candidate: IngestCandidate) -> Result<TrackId> {
@@ -353,6 +470,12 @@ impl Repository {
         )?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeletedTrackPaths {
+    pub file_path: Option<String>,
+    pub cover_path: Option<String>,
 }
 
 fn now_ms() -> i64 {

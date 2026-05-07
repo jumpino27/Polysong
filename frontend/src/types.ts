@@ -27,6 +27,7 @@ export interface TrackFilter {
   source?: AudioSource | null
   search?: string | null
   favoritesOnly: boolean
+  playlistId?: number | null
 }
 
 export interface TrackPatch {
@@ -53,6 +54,7 @@ export interface IngestRequest {
   input: string
   advancedPublicSuno: boolean
   consentAccepted: boolean
+  playlistId?: number | null
 }
 
 export interface IngestJob {

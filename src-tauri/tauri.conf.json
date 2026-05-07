@@ -20,13 +20,24 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:4777; img-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 data: polysong:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 data: polysong:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:4777 polysong: http://polysong.localhost; img-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 polysong: http://polysong.localhost data:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:4777 polysong: http://polysong.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "externalBin": []
+    "externalBin": [],
+    "useLocalToolsDir": true,
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "startMenuFolder": "Polysong",
+        "installerHooks": "nsis-hooks.nsh"
+      }
+    }
   }
 }
