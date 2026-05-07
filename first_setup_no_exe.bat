@@ -4,6 +4,7 @@ setlocal
 set "PROJECT_DIR=%~dp0"
 if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 set "DEV_DIR=%PROJECT_DIR%\.dev"
+set "PROJECT_TOOLS_DIR=%PROJECT_DIR%\tools"
 set "PROJECT_NODE_DIR=%DEV_DIR%\node"
 set "PROJECT_PNPM_HOME=%DEV_DIR%\pnpm"
 set "PROJECT_PNPM_BIN=%PROJECT_PNPM_HOME%\node_modules\.bin"
@@ -55,6 +56,10 @@ if not exist "%PROJECT_DIR%\frontend\node_modules\.bin\tauri.cmd" (
   call pnpm -C frontend add -D @tauri-apps/cli@^2.9.3 || exit /b 1
 )
 call pnpm -C frontend exec tauri --version || exit /b 1
+
+echo.
+echo == Preparing media helper tools ==
+call :ensure_media_tools || exit /b 1
 
 echo.
 echo == Creating start_no_exe.bat ==
@@ -136,6 +141,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference =
 "%RUSTUP_INIT%" -y --no-modify-path --default-toolchain stable --profile minimal || exit /b 1
 rustup default stable || exit /b 1
 for /f "delims=" %%V in ('cargo --version') do echo Installed project-local %%V
+exit /b 0
+
+:ensure_media_tools
+set "INSTALLER_TOOLS_DIR=%PROJECT_TOOLS_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\prepare_installer_tools.ps1"
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :write_start_bat

@@ -138,9 +138,9 @@ The installed Windows app keeps its own database and songs beside the installed 
 
 | Script | Platform | What it does |
 | --- | --- | --- |
-| `first_setup_no_exe.bat` | Windows | Installs/checks local project tools, installs frontend dependencies, checks Rust/Cargo, builds what is needed, and creates `start_no_exe.bat`. |
+| `first_setup_no_exe.bat` | Windows | Installs/checks local project tools, installs frontend dependencies, checks Rust/Cargo, downloads media helpers, builds what is needed, and creates `start_no_exe.bat`. |
 | `start_no_exe.bat` | Windows | Starts the Rust backend and the browser frontend for local source-code use. |
-| `first_setup_no_exe.sh` | Linux/macOS | Same idea as the Windows setup script, but for Unix-like systems. |
+| `first_setup_no_exe.sh` | Linux/macOS | Same idea as the Windows setup script, but for Unix-like systems. It also downloads local `yt-dlp`, `ffmpeg`, and `ffprobe` tools. |
 | `start_no_exe.sh` | Linux/macOS | Starts the local backend and browser frontend. |
 | `installer_windows.bat` | Windows | Builds the Windows installer and writes it to `dist/installed.exe`. |
 
@@ -161,11 +161,13 @@ If you prefer package commands:
 
 ## Requirements
 
-The setup scripts try to keep tools local to this project where possible. If you install things manually for development, you need:
+The setup scripts keep the app's tooling local to this project where possible. They create ignored `.dev/` and `tools/` folders for downloaded compilers, package tools, and media helpers.
+
+If you install things manually for development, you need:
 
 - Node.js and pnpm
 - Rust and Cargo
-- Python 3 or `yt-dlp` for YouTube imports
+- `yt-dlp` for YouTube imports
 - `ffmpeg` and `ffprobe` for local-file metadata and cover extraction
 
 ## Privacy And Rights
