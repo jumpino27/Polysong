@@ -13,8 +13,22 @@ set "NSIS_DIR=%PROJECT_DIR%\target\release\bundle\nsis"
 set "DIST_DIR=%PROJECT_DIR%\dist"
 set "INSTALLER_OUT=%DIST_DIR%\installed.exe"
 set "INSTALLER_TOOLS_DIR=%PROJECT_DIR%\src-tauri\installer-tools\windows"
+set "GITHUB_REPO=jumpino27/Polysong"
 
 cd /d "%PROJECT_DIR%" || exit /b 1
+
+if not exist "%PROJECT_DIR%\.git" (
+  if not defined POLYSONG_FORCE_BUILD (
+    echo.
+    echo == GitHub release source archive detected ==
+    echo This archive does not include build outputs. Downloading the matching release installer instead.
+    call :download_release_installer
+    if not errorlevel 1 exit /b 0
+    echo.
+    echo Could not download the matching release installer. Falling back to a local build.
+    echo To force a local build immediately, set POLYSONG_FORCE_BUILD=1 before running this script.
+  )
+)
 
 if exist "%PROJECT_NODE_DIR%\node.exe" set "PATH=%PROJECT_NODE_DIR%;%PATH%"
 if exist "%PROJECT_PNPM_BIN%\pnpm.cmd" set "PATH=%PROJECT_PNPM_BIN%;%PATH%"
@@ -73,6 +87,34 @@ echo Installer created:
 echo "%INSTALLER_OUT%"
 echo.
 echo The installer installs the Tauri desktop app, bundled yt-dlp, bundled ffmpeg/ffprobe, and initializes songs folders beside the installed executable.
+exit /b 0
+
+:download_release_installer
+if not exist "%DIST_DIR%" mkdir "%DIST_DIR%" || exit /b 1
+
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $config = Get-Content -Raw -LiteralPath (Join-Path $env:PROJECT_DIR 'src-tauri\tauri.conf.json') | ConvertFrom-Json; 'v' + $config.version"') do set "RELEASE_TAG=%%V"
+
+if not defined RELEASE_TAG (
+  echo Could not determine release tag from src-tauri\tauri.conf.json.
+  exit /b 1
+)
+
+set "RELEASE_INSTALLER_URL=https://github.com/%GITHUB_REPO%/releases/download/%RELEASE_TAG%/installed.exe"
+echo Downloading "%RELEASE_INSTALLER_URL%"
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri $env:RELEASE_INSTALLER_URL -OutFile $env:INSTALLER_OUT"
+if errorlevel 1 exit /b 1
+
+if not exist "%INSTALLER_OUT%" (
+  echo Release installer was not created: "%INSTALLER_OUT%"
+  exit /b 1
+)
+
+echo.
+echo Installer created:
+echo "%INSTALLER_OUT%"
+echo.
+echo This file was downloaded from the GitHub release asset for %RELEASE_TAG%.
 exit /b 0
 
 :prepare_installer_tools

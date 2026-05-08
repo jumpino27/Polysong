@@ -39,6 +39,8 @@ This builds:
 dist/installed.exe
 ```
 
+If you downloaded GitHub's `Source code (zip)` for a release, this script downloads that release's prebuilt Windows installer into `dist/installed.exe`. In a git checkout, it builds the installer locally.
+
 Run `dist/installed.exe` to install Polysong.
 
 The installer lets you choose the install directory. After installation, Polysong keeps its data beside the installed app:
