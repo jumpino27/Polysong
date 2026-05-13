@@ -200,6 +200,34 @@ impl Repository {
         Ok(())
     }
 
+    /// Convert a streaming-only row into a downloaded one. The track keeps its
+    /// id, playlist memberships, favorite flag, etc. — only the audio storage
+    /// columns change. `cover_path` is upgraded only when a fresh value is
+    /// supplied (COALESCE keeps any existing cover otherwise).
+    pub fn upgrade_to_downloaded(
+        &self,
+        track_id: TrackId,
+        file_path: &str,
+        cover_path: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks
+             SET file_path = ?1, is_streaming_only = 0, stream_url = NULL,
+                 cover_path = COALESCE(?2, cover_path)
+             WHERE id = ?3",
+            params![file_path, cover_path, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_job_progress(&self, id: JobId, progress: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ingest_jobs SET progress = ?1, updated_at = ?2 WHERE id = ?3",
+            params![progress, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn find_track_by_source_url(&self, url: &str) -> Result<Option<TrackId>> {
         self.conn
             .query_row(

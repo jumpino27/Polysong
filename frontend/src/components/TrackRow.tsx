@@ -1,4 +1,4 @@
-import { Heart, ListPlus, Music2, Play, Sparkles, Trash2 } from 'lucide-react'
+import { Download, Heart, ListPlus, Music2, Play, Sparkles, Trash2 } from 'lucide-react'
 import type { Track } from '../types'
 import { formatDuration, sourceLabel } from '../lib/format'
 import { mediaUrl } from '../lib/tauri'
@@ -14,6 +14,9 @@ export function TrackRow({
   onDelete,
   deleteLabel = 'Delete track',
   onAddToPlaylist,
+  onDownload,
+  downloading = false,
+  downloadFailed = false,
 }: {
   track: Track
   active: boolean
@@ -24,6 +27,9 @@ export function TrackRow({
   onDelete: () => void
   deleteLabel?: string
   onAddToPlaylist: () => void
+  onDownload?: () => void
+  downloading?: boolean
+  downloadFailed?: boolean
 }) {
   const showStyleChip = Boolean(track.styleDescription)
   const coverUrl = mediaUrl(track.coverPath)
@@ -82,6 +88,24 @@ export function TrackRow({
             aria-label={track.favorite ? 'Remove favorite' : 'Add favorite'}
             onClick={onToggleFavorite}
           />
+          {track.streamingOnly && onDownload && (
+            <Button
+              icon={
+                downloading ? (
+                  <span className="track-action-spinner" aria-hidden />
+                ) : (
+                  <Download size={15} />
+                )
+              }
+              variant="quiet"
+              className={downloadFailed ? 'download-failed' : undefined}
+              aria-label="Download for offline use"
+              title="Download for offline use"
+              aria-busy={downloading || undefined}
+              disabled={downloading}
+              onClick={onDownload}
+            />
+          )}
           <Button icon={<Trash2 size={15} />} variant="quiet" aria-label={deleteLabel} onClick={onDelete} />
         </div>
       </div>

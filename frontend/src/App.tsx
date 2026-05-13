@@ -14,8 +14,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  CloudDownload,
   Disc3,
   Download,
   FileAudio,
@@ -87,6 +89,12 @@ function App() {
   const [libraryTracks, setLibraryTracks] = useState<Track[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [activeJobs, setActiveJobs] = useState<IngestJob[]>([])
+  const [allJobs, setAllJobs] = useState<IngestJob[]>([])
+  const [view, setView] = useState<'library' | 'downloads'>('library')
+  const [downloadingTrackIds, setDownloadingTrackIds] = useState<Set<number>>(new Set())
+  const [downloadFailedTrackIds, setDownloadFailedTrackIds] = useState<Set<number>>(new Set())
+  const [dismissedJobIds, setDismissedJobIds] = useState<Set<number>>(new Set())
+  const [downloadsPulse, setDownloadsPulse] = useState(false)
   const [settings, setSettings] = useState<AppSettings>(defaultSettings)
   const [source, setSource] = useState<AudioSource | 'all'>('all')
   const [search, setSearch] = useState('')
@@ -167,6 +175,7 @@ function App() {
     setTracks(filtered)
     setLibraryTracks(nextLibraryTracks)
     setPlaylists(nextPlaylists)
+    setAllJobs(nextJobs)
     setActiveJobs(nextJobs.filter((job) => job.status === 'queued' || job.status === 'downloading'))
     setSettings(nextSettings)
     setActiveTrack((current) => current ?? filtered[0] ?? null)
@@ -464,6 +473,55 @@ function App() {
     }
   }
 
+  const handleTrackDownload = async (track: Track) => {
+    if (downloadingTrackIds.has(track.id)) return
+    setDownloadingTrackIds((current) => {
+      const next = new Set(current)
+      next.add(track.id)
+      return next
+    })
+    setDownloadFailedTrackIds((current) => {
+      if (!current.has(track.id)) return current
+      const next = new Set(current)
+      next.delete(track.id)
+      return next
+    })
+    try {
+      await api.downloadTrack(track.id)
+      await refresh()
+    } catch (error) {
+      console.error('Polysong: download_track failed.', error)
+      setDownloadFailedTrackIds((current) => {
+        const next = new Set(current)
+        next.add(track.id)
+        return next
+      })
+      window.setTimeout(() => {
+        setDownloadFailedTrackIds((current) => {
+          if (!current.has(track.id)) return current
+          const next = new Set(current)
+          next.delete(track.id)
+          return next
+        })
+      }, 4000)
+    } finally {
+      setDownloadingTrackIds((current) => {
+        if (!current.has(track.id)) return current
+        const next = new Set(current)
+        next.delete(track.id)
+        return next
+      })
+    }
+  }
+
+  const dismissJob = (jobId: number) => {
+    setDismissedJobIds((current) => {
+      const next = new Set(current)
+      next.add(jobId)
+      return next
+    })
+  }
+
   const handleTrackDelete = async (track: Track) => {
     if (activePlaylistId != null) {
       await api.removeTrackFromPlaylist(track.id, activePlaylistId)
@@ -611,6 +669,23 @@ function App() {
           </div>
         </div>
 
+        <nav className="downloads-nav" aria-label="Downloads">
+          <button
+            type="button"
+            className={`downloads-button ${view === 'downloads' ? 'selected' : ''} ${downloadsPulse ? 'pulse' : ''}`}
+            onClick={() => setView('downloads')}
+            aria-pressed={view === 'downloads'}
+          >
+            <CloudDownload size={15} aria-hidden />
+            <span className="downloads-button-label">Downloads</span>
+            {activeJobs.length > 0 && (
+              <span className="downloads-badge" aria-label={`${activeJobs.length} active downloads`}>
+                {activeJobs.length}
+              </span>
+            )}
+          </button>
+        </nav>
+
         <section aria-labelledby="sources-heading">
           <div className="rail-heading">
             <h2 id="sources-heading">Sources</h2>
@@ -622,12 +697,13 @@ function App() {
                 key={value}
                 type="button"
                 data-source={value}
-                className={source === value && activePlaylistId == null ? 'selected' : ''}
+                className={view === 'library' && source === value && activePlaylistId == null ? 'selected' : ''}
                 onClick={() => {
+                  setView('library')
                   setSource(value)
                   setActivePlaylistId(null)
                 }}
-                aria-pressed={source === value && activePlaylistId == null}
+                aria-pressed={view === 'library' && source === value && activePlaylistId == null}
               >
                 <span className="src-dot" aria-hidden />
                 <span className="src-label">{value === 'all' ? 'All sources' : value}</span>
@@ -651,11 +727,14 @@ function App() {
             {playlists.length === 0 && <p className="playlist-empty">No playlists yet.</p>}
             {playlists.map((playlist) => (
               <button
-                className={`playlist-item ${activePlaylistId === playlist.id ? 'selected' : ''}`}
+                className={`playlist-item ${view === 'library' && activePlaylistId === playlist.id ? 'selected' : ''}`}
                 type="button"
                 key={playlist.id}
-                onClick={() => setActivePlaylistId(playlist.id)}
-                aria-pressed={activePlaylistId === playlist.id}
+                onClick={() => {
+                  setView('library')
+                  setActivePlaylistId(playlist.id)
+                }}
+                aria-pressed={view === 'library' && activePlaylistId === playlist.id}
               >
                 <ListMusic size={15} />
                 <span>{playlist.name}</span>
@@ -720,6 +799,13 @@ function App() {
           />
         </header>
 
+        {view === 'downloads' ? (
+          <DownloadsPanel
+            jobs={allJobs.filter((job) => !dismissedJobIds.has(job.id))}
+            onClear={dismissJob}
+          />
+        ) : (
+        <>
         <header className="library-header">
           <div className="library-header-text">
             <h1>{scopeLabel(currentScope)}</h1>
@@ -779,9 +865,14 @@ function App() {
               onDelete={() => void handleTrackDelete(track)}
               deleteLabel={activePlaylistId != null ? 'Remove from playlist' : 'Delete track'}
               onAddToPlaylist={() => setAddToPlaylistTrack(track)}
+              onDownload={track.streamingOnly ? () => void handleTrackDownload(track) : undefined}
+              downloading={downloadingTrackIds.has(track.id)}
+              downloadFailed={downloadFailedTrackIds.has(track.id)}
             />
           ))}
         </section>
+        </>
+        )}
       </section>
 
       <aside
@@ -958,6 +1049,8 @@ function App() {
         onSettings={updateSettings}
         onQueued={() => {
           setIngestOpen(false)
+          setDownloadsPulse(true)
+          window.setTimeout(() => setDownloadsPulse(false), 2000)
           void refresh()
         }}
       />
@@ -1010,6 +1103,133 @@ function AppTitlebar() {
         </button>
       </div>
     </div>
+  )
+}
+
+function statusLabel(status: IngestJob['status']): string {
+  if (status === 'queued') return 'Queued'
+  if (status === 'downloading') return 'Downloading'
+  if (status === 'ready') return 'Done'
+  if (status === 'failed') return 'Failed'
+  return 'Cancelled'
+}
+
+function DownloadsPanel({
+  jobs,
+  onClear,
+}: {
+  jobs: IngestJob[]
+  onClear: (jobId: number) => void
+}) {
+  const inProgress = useMemo(
+    () =>
+      jobs
+        .filter((job) => job.status === 'queued' || job.status === 'downloading')
+        .sort((a, b) => b.createdAt - a.createdAt),
+    [jobs],
+  )
+  const recent = useMemo(
+    () =>
+      jobs
+        .filter((job) => job.status === 'ready' || job.status === 'failed')
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 20),
+    [jobs],
+  )
+
+  if (jobs.length === 0) {
+    return (
+      <section className="downloads-panel" aria-labelledby="downloads-heading">
+        <header className="library-header">
+          <div className="library-header-text">
+            <h1 id="downloads-heading">Downloads</h1>
+          </div>
+        </header>
+        <p className="downloads-empty">
+          No imports yet. Use the Ingest button to add a song or playlist.
+        </p>
+      </section>
+    )
+  }
+
+  return (
+    <section className="downloads-panel" aria-labelledby="downloads-heading">
+      <header className="library-header">
+        <div className="library-header-text">
+          <h1 id="downloads-heading">Downloads</h1>
+        </div>
+        <div className="library-header-meta">
+          <span><strong>{inProgress.length}</strong> active</span>
+          <span className="meta-sep" aria-hidden>·</span>
+          <span><strong>{recent.length}</strong> recent</span>
+        </div>
+      </header>
+
+      {inProgress.length > 0 && (
+        <>
+          <h2 className="downloads-section-heading">In progress</h2>
+          <div className="downloads-list">
+            {inProgress.map((job) => (
+              <DownloadsRow key={job.id} job={job} onClear={onClear} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {recent.length > 0 && (
+        <>
+          <h2 className="downloads-section-heading">Recent</h2>
+          <div className="downloads-list">
+            {recent.map((job) => (
+              <DownloadsRow key={job.id} job={job} onClear={onClear} />
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function DownloadsRow({ job, onClear }: { job: IngestJob; onClear: (jobId: number) => void }) {
+  const dismissible = job.status === 'ready' || job.status === 'failed'
+  const pct = Math.round(Math.max(0, Math.min(1, job.progress)) * 100)
+  const indeterminate = job.status === 'downloading' && (!job.progress || job.progress <= 0)
+  return (
+    <article className="downloads-row" data-status={job.status} data-source={job.source}>
+      <span className={`source-pill source-${job.source}`}>{sourceLabel(job.source)}</span>
+      <span className="downloads-row-input" title={job.input}>{job.input || '—'}</span>
+      <div className="downloads-row-body">
+        <span className={`downloads-row-status status-${job.status}`}>
+          {job.status === 'ready' && <CheckCircle2 size={12} />}
+          {statusLabel(job.status)}
+        </span>
+        {job.status === 'downloading' && (
+          <div
+            className={`downloads-row-progress ${indeterminate ? 'indeterminate' : ''}`}
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={indeterminate ? undefined : pct}
+          >
+            <span style={indeterminate ? undefined : { width: `${pct}%` }} />
+          </div>
+        )}
+        {job.status === 'failed' && job.error && (
+          <p className="downloads-row-error">{job.error}</p>
+        )}
+      </div>
+      {dismissible && (
+        <button
+          type="button"
+          className="downloads-row-dismiss"
+          aria-label="Dismiss"
+          title="Dismiss"
+          onClick={() => onClear(job.id)}
+        >
+          <X size={14} />
+        </button>
+      )}
+    </article>
   )
 }
 

@@ -95,6 +95,10 @@ export const api = {
   createPlaylist: (name: string, description?: string | null) =>
     call<Playlist>('create_playlist', { name, description }, () => mockCreatePlaylist(name, description)),
   ingestUrl: (request: IngestRequest) => call<number>('ingest_url', { request }, () => mockIngest(request)),
+  downloadTrack: (trackId: number) =>
+    call<Track>('download_track', { trackId }, async () => {
+      throw new Error('download_track is not available in browser preview')
+    }),
   uploadLocal: async (file: File, playlistId?: number | null) => {
     try {
       const params = new URLSearchParams({ filename: file.name })

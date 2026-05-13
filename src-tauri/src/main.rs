@@ -78,10 +78,16 @@ impl AppState {
         // the user, or never written for a failed import) shouldn't block
         // the DB delete that has already succeeded.
         if let Some(rel) = paths.file_path {
-            let abs = self
-                .data_dir
-                .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-            let _ = std::fs::remove_file(&abs);
+            // Streaming-only rows use a `streaming://<id>` sentinel as their
+            // file_path. There is no on-disk file to remove for those, so we
+            // skip the filesystem call entirely (joining the data_dir with the
+            // sentinel would just produce a nonexistent path).
+            if !rel.starts_with("streaming://") {
+                let abs = self
+                    .data_dir
+                    .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let _ = std::fs::remove_file(&abs);
+            }
         }
         if let Some(rel) = paths.cover_path {
             let abs = self
@@ -165,7 +171,7 @@ impl AppState {
         Ok(())
     }
 
-    fn ingest_url(&self, request: IngestRequest) -> Result<i64, String> {
+    fn ingest_url(self: &Arc<Self>, request: IngestRequest) -> Result<i64, String> {
         // YouTube playlist URLs (those with a real `list=` id, not radio mixes)
         // fan out into one sub-ingest per video so the user gets every track
         // in the playlist instead of just the linked video.
@@ -175,77 +181,93 @@ impl AppState {
             return self.ingest_youtube_playlist(request);
         }
 
-        // Dedup: if a track with this exact source URL already exists, skip
-        // the network/registry step entirely and just record a completed job
-        // for the existing track. This keeps re-ingesting the same Suno or
-        // YouTube URL fast and avoids creating duplicate library rows.
+        // Fast-path dedup: if a track with this exact source URL already
+        // exists, apply the streaming-vs-download three-way decision before
+        // touching the network or the registry.
+        //
+        //   * downloaded existing + streaming request  → keep existing (sync)
+        //   * existing matches request mode            → keep existing (sync)
+        //   * streaming existing + download request    → upgrade in background
+        //
+        // The two "no work" branches complete the job synchronously so the
+        // frontend sees status=ready immediately. The upgrade branch hands off
+        // to a background thread so the Tauri command can return the job_id
+        // straight away (matching the new async contract).
         if !request.input.trim().is_empty() {
-            if let Ok(repo) = self.repo.lock() {
-                if let Ok(Some(existing_id)) = repo.find_track_by_source_url(&request.input) {
-                    drop(repo);
-                    let job_id = self
-                        .repo
-                        .lock()
-                        .map_err(lock_err)?
-                        .queue_ingest(&request)
-                        .map_err(to_string)?;
+            let existing = {
+                let repo = self.repo.lock().map_err(lock_err)?;
+                let id = repo
+                    .find_track_by_source_url(&request.input)
+                    .map_err(to_string)?;
+                match id {
+                    Some(id) => repo.get_track(id).map_err(to_string)?,
+                    None => None,
+                }
+            };
+            if let Some(existing) = existing {
+                let existing_id = existing.id;
+                let needs_upgrade = existing.streaming_only && !request.streaming_only;
+                let job_id = self
+                    .repo
+                    .lock()
+                    .map_err(lock_err)?
+                    .queue_ingest(&request)
+                    .map_err(to_string)?;
+                if needs_upgrade {
+                    // Build a synthetic candidate from the existing row and
+                    // run the audio download off-thread.
+                    let candidate = synthesize_candidate_for_upgrade(&existing)?;
+                    let state = Arc::clone(self);
+                    let request_for_thread = request.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = state.upgrade_streaming_track_inner(
+                            existing_id,
+                            candidate,
+                            &request_for_thread,
+                        ) {
+                            let _ = state
+                                .repo
+                                .lock()
+                                .ok()
+                                .and_then(|repo| repo.fail_job(job_id, &error).ok());
+                            return;
+                        }
+                        if let Ok(repo) = state.repo.lock() {
+                            let _ = repo.complete_job(job_id, existing_id);
+                        }
+                    });
+                } else {
+                    // No work needed: complete the job synchronously, attach
+                    // to the requested playlist, return.
                     let _ = self
                         .repo
                         .lock()
                         .map_err(lock_err)?
                         .complete_job(job_id, existing_id);
                     self.attach_to_requested_playlist(&request, existing_id)?;
-                    return Ok(job_id);
                 }
+                return Ok(job_id);
             }
         }
+
+        // Fresh ingest path: queue the job synchronously, run the actual
+        // network + filesystem work on a background thread.
         let job_id = self
             .repo
             .lock()
             .map_err(lock_err)?
             .queue_ingest(&request)
             .map_err(to_string)?;
-        match self.registry.prepare(&request) {
-            Ok(candidates) => {
-                let result: Result<i64, String> = (|| {
-                    let mut first_track_id = None;
-                    for mut candidate in candidates {
-                        materialize_candidate(&self.data_dir, &mut candidate)?;
-                        let track_id = self
-                            .repo
-                            .lock()
-                            .map_err(lock_err)?
-                            .insert_candidate(candidate)
-                            .map_err(to_string)?;
-                        self.attach_to_requested_playlist(&request, track_id)?;
-                        first_track_id.get_or_insert(track_id);
-                    }
-                    let repo = self.repo.lock().map_err(lock_err)?;
-                    repo.complete_job(job_id, first_track_id.unwrap_or_default())
-                        .map_err(to_string)?;
-                    Ok(job_id)
-                })();
-                if let Err(error) = &result {
-                    let _ = self
-                        .repo
-                        .lock()
-                        .map_err(lock_err)?
-                        .fail_job(job_id, error.as_str());
-                }
-                result
-            }
-            Err(error) => {
-                let _ = self
-                    .repo
-                    .lock()
-                    .map_err(lock_err)?
-                    .fail_job(job_id, &error.to_string());
-                Err(error.to_string())
-            }
-        }
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            state.run_ingest_job(job_id, request);
+        });
+        Ok(job_id)
     }
 
-    fn ingest_youtube_playlist(&self, request: IngestRequest) -> Result<i64, String> {
+    fn ingest_youtube_playlist(self: &Arc<Self>, request: IngestRequest) -> Result<i64, String> {
+        // Enumerate the playlist synchronously so we can fail fast for empty
+        // playlists (the contract: ingest_url returns Err in that case).
         let video_urls = enumerate_youtube_playlist(&self.data_dir, &request.input)?;
         if video_urls.is_empty() {
             return Err("YouTube playlist had no playable videos".to_owned());
@@ -258,59 +280,334 @@ impl AppState {
             .queue_ingest(&request)
             .map_err(to_string)?;
 
-        let result: Result<i64, String> = (|| {
-            let mut first_track_id: Option<TrackId> = None;
-            for video_url in &video_urls {
-                // Per-video dedup: re-ingesting the same playlist (or one that
-                // overlaps with the library) becomes a no-op for known videos.
-                let existing = {
-                    let repo = self.repo.lock().map_err(lock_err)?;
-                    repo.find_track_by_source_url(video_url)
-                        .map_err(to_string)?
-                };
-                if let Some(existing_id) = existing {
-                    self.attach_to_requested_playlist(&request, existing_id)?;
-                    first_track_id.get_or_insert(existing_id);
-                    continue;
-                }
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            state.run_youtube_playlist_job(job_id, request, video_urls);
+        });
+        Ok(job_id)
+    }
 
-                let sub_request = IngestRequest {
-                    input: video_url.clone(),
-                    playlist_id: None,
-                    ..request.clone()
-                };
-                let candidates = self
-                    .registry
-                    .prepare(&sub_request)
-                    .map_err(|error| error.to_string())?;
-                for mut candidate in candidates {
-                    materialize_candidate(&self.data_dir, &mut candidate)?;
-                    let track_id = self
-                        .repo
-                        .lock()
-                        .map_err(lock_err)?
-                        .insert_candidate(candidate)
-                        .map_err(to_string)?;
-                    self.attach_to_requested_playlist(&request, track_id)?;
-                    first_track_id.get_or_insert(track_id);
-                }
+    /// Background worker for the non-playlist `ingest_url` path. Walks every
+    /// candidate produced by the registry, materializes it, and writes the
+    /// result to the DB. For the Suno multi-candidate playlist case this
+    /// loop is also where the streaming-vs-download dedup decision runs
+    /// (via `reconcile_existing_or_insert`).
+    fn run_ingest_job(&self, job_id: i64, request: IngestRequest) {
+        let outcome: Result<TrackId, String> = (|| {
+            let candidates = self
+                .registry
+                .prepare(&request)
+                .map_err(|error| error.to_string())?;
+            let mut first_track_id: Option<TrackId> = None;
+            for candidate in candidates {
+                let track_id = self.reconcile_existing_or_insert(candidate, &request)?;
+                first_track_id.get_or_insert(track_id);
             }
-            self.repo
-                .lock()
-                .map_err(lock_err)?
-                .complete_job(job_id, first_track_id.unwrap_or_default())
-                .map_err(to_string)?;
-            Ok(job_id)
+            Ok(first_track_id.unwrap_or_default())
         })();
 
-        if let Err(error) = &result {
-            let _ = self
-                .repo
-                .lock()
-                .map_err(lock_err)?
-                .fail_job(job_id, error.as_str());
+        match outcome {
+            Ok(track_id) => {
+                if let Ok(repo) = self.repo.lock() {
+                    let _ = repo.complete_job(job_id, track_id);
+                }
+            }
+            Err(error) => {
+                if let Ok(repo) = self.repo.lock() {
+                    let _ = repo.fail_job(job_id, &error);
+                }
+            }
         }
-        result
+    }
+
+    /// Background worker for YouTube playlist fan-out. Each video gets the
+    /// same three-way dedup treatment as the fast-path in `ingest_url`.
+    fn run_youtube_playlist_job(
+        &self,
+        job_id: i64,
+        request: IngestRequest,
+        video_urls: Vec<String>,
+    ) {
+        let outcome: Result<TrackId, String> = (|| {
+            let mut first_track_id: Option<TrackId> = None;
+            let total = video_urls.len();
+            for (index, video_url) in video_urls.iter().enumerate() {
+                // Per-video dedup with mode-aware upgrade.
+                let existing = {
+                    let repo = self.repo.lock().map_err(lock_err)?;
+                    let id = repo.find_track_by_source_url(video_url).map_err(to_string)?;
+                    match id {
+                        Some(id) => repo.get_track(id).map_err(to_string)?,
+                        None => None,
+                    }
+                };
+                if let Some(existing) = existing {
+                    let existing_id = existing.id;
+                    if existing.streaming_only && !request.streaming_only {
+                        // streaming → download: upgrade in place.
+                        let candidate = synthesize_candidate_for_upgrade(&existing)?;
+                        let upgrade_request = IngestRequest {
+                            input: video_url.clone(),
+                            playlist_id: None,
+                            ..request.clone()
+                        };
+                        self.upgrade_streaming_track_inner(
+                            existing_id,
+                            candidate,
+                            &upgrade_request,
+                        )?;
+                    }
+                    // For (downloaded + streaming-request) or matching-modes
+                    // we keep the existing row as-is.
+                    self.attach_to_requested_playlist(&request, existing_id)?;
+                    first_track_id.get_or_insert(existing_id);
+                } else {
+                    let sub_request = IngestRequest {
+                        input: video_url.clone(),
+                        playlist_id: None,
+                        ..request.clone()
+                    };
+                    let candidates = self
+                        .registry
+                        .prepare(&sub_request)
+                        .map_err(|error| error.to_string())?;
+                    for candidate in candidates {
+                        let track_id =
+                            self.reconcile_existing_or_insert(candidate, &request)?;
+                        first_track_id.get_or_insert(track_id);
+                    }
+                }
+
+                // Best-effort progress: completion alone is enough per the
+                // contract, but a per-video progress tick gives the frontend
+                // something to render in the meantime.
+                if total > 0 {
+                    let progress = (index as f64 + 1.0) / total as f64;
+                    if let Ok(repo) = self.repo.lock() {
+                        let _ = repo.update_job_progress(job_id, progress);
+                    }
+                }
+            }
+            Ok(first_track_id.unwrap_or_default())
+        })();
+
+        match outcome {
+            Ok(track_id) => {
+                if let Ok(repo) = self.repo.lock() {
+                    let _ = repo.complete_job(job_id, track_id);
+                }
+            }
+            Err(error) => {
+                if let Ok(repo) = self.repo.lock() {
+                    let _ = repo.fail_job(job_id, &error);
+                }
+            }
+        }
+    }
+
+    /// Look up the candidate's source_url, and either upgrade/keep the
+    /// existing track or insert a fresh row. Centralizes the
+    /// streaming-vs-download three-way decision so the Suno candidate loop,
+    /// the per-video YouTube playlist loop, and the single-URL ingest path
+    /// all behave identically.
+    fn reconcile_existing_or_insert(
+        &self,
+        mut candidate: IngestCandidate,
+        request: &IngestRequest,
+    ) -> Result<TrackId, String> {
+        let lookup_url = candidate
+            .source_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(|url| url.to_owned());
+
+        if let Some(url) = lookup_url {
+            let existing = {
+                let repo = self.repo.lock().map_err(lock_err)?;
+                let id = repo.find_track_by_source_url(&url).map_err(to_string)?;
+                match id {
+                    Some(id) => repo.get_track(id).map_err(to_string)?,
+                    None => None,
+                }
+            };
+            if let Some(existing) = existing {
+                let existing_id = existing.id;
+                if existing.streaming_only && !candidate.streaming_only {
+                    // Upgrade streaming → downloaded in place.
+                    materialize_candidate(&self.data_dir, &mut candidate)?;
+                    let cover_path = candidate.cover_path.as_deref();
+                    self.repo
+                        .lock()
+                        .map_err(lock_err)?
+                        .upgrade_to_downloaded(existing_id, &candidate.file_path, cover_path)
+                        .map_err(to_string)?;
+                }
+                // For (downloaded + streaming-candidate) or matching-modes:
+                // download always wins, so we leave the existing row alone.
+                self.attach_to_requested_playlist(request, existing_id)?;
+                return Ok(existing_id);
+            }
+        }
+
+        materialize_candidate(&self.data_dir, &mut candidate)?;
+        let track_id = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .insert_candidate(candidate)
+            .map_err(to_string)?;
+        self.attach_to_requested_playlist(request, track_id)?;
+        Ok(track_id)
+    }
+
+    /// Shared between the fast-path upgrade in `ingest_url` and the per-video
+    /// upgrade in the YouTube playlist worker. Materializes (downloads) the
+    /// given candidate and flips the existing row to a downloaded state.
+    fn upgrade_streaming_track_inner(
+        &self,
+        existing_id: TrackId,
+        mut candidate: IngestCandidate,
+        request: &IngestRequest,
+    ) -> Result<(), String> {
+        materialize_candidate(&self.data_dir, &mut candidate)?;
+        let cover_path = candidate.cover_path.as_deref();
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .upgrade_to_downloaded(existing_id, &candidate.file_path, cover_path)
+            .map_err(to_string)?;
+        self.attach_to_requested_playlist(request, existing_id)?;
+        Ok(())
+    }
+
+    /// Synchronous (frontend awaits a spinner) on-demand upgrade of a single
+    /// streaming-only track to a downloaded one. Distinct from
+    /// `upgrade_streaming_track_inner` because the entry point here is the
+    /// track id rather than an ingest request.
+    fn download_track(&self, track_id: TrackId) -> Result<Track, String> {
+        let existing = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .get_track(track_id)
+            .map_err(to_string)?
+            .ok_or_else(|| format!("track {track_id} not found"))?;
+
+        if !existing.streaming_only {
+            return Err("Track is already downloaded".to_owned());
+        }
+
+        let source_id = existing
+            .source_id
+            .clone()
+            .ok_or_else(|| "track is missing source_id".to_owned())?;
+        let source_url = existing
+            .source_url
+            .clone()
+            .ok_or_else(|| "track is missing source_url".to_owned())?;
+
+        let file_path = match existing.source {
+            AudioSource::Youtube => format!("songs/youtube/{source_id}.mp3"),
+            AudioSource::Suno => format!("songs/suno/{source_id}.mp3"),
+            AudioSource::Local => {
+                return Err("local tracks cannot be downloaded from streaming".to_owned());
+            }
+        };
+
+        let mut candidate = IngestCandidate {
+            source: existing.source,
+            source_id: existing.source_id.clone(),
+            title: existing.title.clone(),
+            artist: existing.artist.clone(),
+            album: existing.album.clone(),
+            source_url: Some(source_url.clone()),
+            original_input: Some(source_url),
+            file_path: file_path.clone(),
+            download_url: None,
+            cover_url: None,
+            cover_path: existing.cover_path.clone(),
+            duration_ms: existing.duration_ms,
+            style_description: existing.style_description.clone(),
+            suno_prompt: existing.suno_prompt.clone(),
+            lyrics: existing.lyrics.clone(),
+            streaming_only: false,
+            stream_url: None,
+        };
+
+        // Ensure target directory exists and run the appropriate downloader.
+        let destination = self
+            .data_dir
+            .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(to_string)?;
+        }
+
+        match existing.source {
+            AudioSource::Youtube => {
+                // enrich_youtube_metadata can refresh title/artist/cover_url;
+                // we keep the existing title/artist if it returns empty.
+                enrich_youtube_metadata(&mut candidate, &self.data_dir);
+                if existing.cover_path.is_none() && candidate.cover_url.is_some() {
+                    download_cover(&self.data_dir, &mut candidate)?;
+                }
+                if !destination.exists()
+                    || destination.metadata().map_err(to_string)?.len() == 0
+                {
+                    download_youtube(&self.data_dir, &candidate, &destination)?;
+                }
+            }
+            AudioSource::Suno => {
+                // For Suno we need a fresh audio URL; the easiest way is to
+                // re-run the Suno source's `prepare` and pick the candidate
+                // whose source_id matches. If that fails for any reason fall
+                // back to the existing stream_url (which may still be valid).
+                let prepare_request = IngestRequest {
+                    source: AudioSource::Suno,
+                    input: candidate.source_url.clone().unwrap_or_default(),
+                    advanced_public_suno: false,
+                    consent_accepted: true,
+                    playlist_id: None,
+                    streaming_only: false,
+                };
+                if let Ok(prepared) = self.registry.prepare(&prepare_request) {
+                    if let Some(matched) = prepared
+                        .into_iter()
+                        .find(|c| c.source_id == candidate.source_id)
+                    {
+                        candidate.download_url = matched.download_url;
+                        candidate.cover_url = candidate.cover_url.or(matched.cover_url);
+                        if candidate.title.is_empty() {
+                            candidate.title = matched.title;
+                        }
+                        candidate.artist = candidate.artist.or(matched.artist);
+                        candidate.duration_ms = candidate.duration_ms.or(matched.duration_ms);
+                    }
+                }
+                if candidate.download_url.is_none() {
+                    candidate.download_url = existing.stream_url.clone();
+                }
+                if existing.cover_path.is_none() && candidate.cover_url.is_some() {
+                    download_cover(&self.data_dir, &mut candidate)?;
+                }
+                if !destination.exists()
+                    || destination.metadata().map_err(to_string)?.len() == 0
+                {
+                    download_http(&candidate, &destination)?;
+                }
+            }
+            AudioSource::Local => unreachable!(),
+        }
+
+        let cover_path = candidate.cover_path.as_deref();
+        self.repo
+            .lock()
+            .map_err(lock_err)?
+            .upgrade_to_downloaded(track_id, &candidate.file_path, cover_path)
+            .map_err(to_string)?;
+
+        self.get_track(track_id)?
+            .ok_or_else(|| format!("track {track_id} disappeared after download"))
     }
 
     fn list_ingest_jobs(&self) -> Result<Vec<IngestJob>, String> {
@@ -471,6 +768,20 @@ fn delete_track(state: State<Arc<AppState>>, id: TrackId) -> Result<(), String> 
 #[tauri::command]
 fn ingest_url(state: State<Arc<AppState>>, request: IngestRequest) -> Result<i64, String> {
     state.ingest_url(request)
+}
+
+#[tauri::command]
+async fn download_track(
+    state: State<'_, Arc<AppState>>,
+    track_id: i64,
+) -> Result<Track, String> {
+    // The actual download is blocking (network + filesystem). Hand it off to
+    // the blocking pool so the async runtime is not stalled, but keep the
+    // command itself awaitable so the frontend can `await` + show a spinner.
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || state.download_track(track_id))
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -754,6 +1065,7 @@ fn main() {
             update_track_metadata,
             delete_track,
             ingest_url,
+            download_track,
             list_ingest_jobs,
             list_playlists,
             create_playlist,
@@ -1228,7 +1540,7 @@ fn serve_http_backend(backend: Arc<AppState>) -> Result<(), String> {
 }
 
 fn handle_http_request(
-    backend: &AppState,
+    backend: &Arc<AppState>,
     request: &mut tiny_http::Request,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     if request.method() == &tiny_http::Method::Options {
@@ -1236,7 +1548,7 @@ fn handle_http_request(
     }
 
     if request.method() == &tiny_http::Method::Get && request.url().starts_with("/media/") {
-        return media_response(backend, request);
+        return media_response(backend.as_ref(), request);
     }
 
     let result = match (request.method(), request.url()) {
@@ -1254,6 +1566,8 @@ fn handle_http_request(
         }
         (&tiny_http::Method::Post, "/api/ingest_url") => parse_body::<IngestRequestBody>(request)
             .and_then(|body| to_json(backend.ingest_url(body.request))),
+        (&tiny_http::Method::Post, "/api/download_track") => parse_body::<TrackIdBody>(request)
+            .and_then(|body| to_json(backend.download_track(body.track_id))),
         (&tiny_http::Method::Post, path) if path.starts_with("/api/upload_local") => {
             let filename = query_value(path, "filename")
                 .and_then(percent_decode)
@@ -1774,6 +2088,48 @@ struct SetTrackPlaylistsBody {
 #[serde(rename_all = "camelCase")]
 struct PlaylistIdBody {
     playlist_id: polysong_core::PlaylistId,
+}
+
+/// Build an `IngestCandidate` from an existing streaming-only track row so
+/// the standard `materialize_candidate` pipeline can download its audio. The
+/// returned candidate has `streaming_only = false` and a real on-disk
+/// `file_path`, plus `original_input` set to the source URL so the YouTube /
+/// Suno downloaders have something to fetch.
+fn synthesize_candidate_for_upgrade(existing: &Track) -> Result<IngestCandidate, String> {
+    let source_id = existing
+        .source_id
+        .clone()
+        .ok_or_else(|| "streaming track missing source_id".to_owned())?;
+    let source_url = existing
+        .source_url
+        .clone()
+        .ok_or_else(|| "streaming track missing source_url".to_owned())?;
+    let file_path = match existing.source {
+        AudioSource::Youtube => format!("songs/youtube/{source_id}.mp3"),
+        AudioSource::Suno => format!("songs/suno/{source_id}.mp3"),
+        AudioSource::Local => {
+            return Err("local tracks cannot be upgraded from streaming".to_owned());
+        }
+    };
+    Ok(IngestCandidate {
+        source: existing.source,
+        source_id: existing.source_id.clone(),
+        title: existing.title.clone(),
+        artist: existing.artist.clone(),
+        album: existing.album.clone(),
+        source_url: Some(source_url.clone()),
+        original_input: Some(source_url),
+        file_path,
+        download_url: existing.stream_url.clone(),
+        cover_url: None,
+        cover_path: existing.cover_path.clone(),
+        duration_ms: existing.duration_ms,
+        style_description: existing.style_description.clone(),
+        suno_prompt: existing.suno_prompt.clone(),
+        lyrics: existing.lyrics.clone(),
+        streaming_only: false,
+        stream_url: None,
+    })
 }
 
 fn materialize_candidate(data_dir: &Path, candidate: &mut IngestCandidate) -> Result<(), String> {
