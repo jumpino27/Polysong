@@ -17,10 +17,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Disc3,
+  Download,
   FileAudio,
   ListMusic,
   Loader2,
   Maximize2,
+  Minus,
   Minimize2,
   Moon,
   PanelRightClose,
@@ -36,11 +38,14 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Square,
   Sun,
   Upload,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
 import { Button } from './components/Button'
 import { AddToPlaylistDialog } from './components/AddToPlaylistDialog'
@@ -53,7 +58,7 @@ import { CoverVisualizer } from './features/visualizer/CoverVisualizer'
 import { audioEngine, type RepeatMode } from './features/player/audioEngine'
 import { formatDuration, formatTime, sourceLabel } from './lib/format'
 import { api, mediaUrl } from './lib/tauri'
-import type { AppSettings, AudioSource, IngestJob, Playlist, Track, TrackFilter, VisualizerMode } from './types'
+import type { AppSettings, AudioSource, IngestJob, Playlist, Track, TrackFilter, UpdateStatus, VisualizerMode } from './types'
 
 const defaultSettings: AppSettings = {
   theme: 'dark',
@@ -110,12 +115,21 @@ function App() {
   const [queueTracks, setQueueTracks] = useState<Track[]>([])
   const [activePlaylistId, setActivePlaylistId] = useState<number | null>(null)
   const [activePlaylistMembers, setActivePlaylistMembers] = useState<Set<number> | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
+  const [installingUpdate, setInstallingUpdate] = useState(false)
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  )
+  const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<number>>(new Set())
 
   const seekingRef = useRef(false)
 
   const refresh = useCallback(async () => {
+    // When a playlist is active, ignore the source filter so users see every
+    // track in the playlist regardless of which source pill was last selected.
+    const effectiveSource = activePlaylistId != null ? null : source === 'all' ? null : source
     const filter: TrackFilter = {
-      source: source === 'all' ? null : source,
+      source: effectiveSource,
       search: search || null,
       favoritesOnly,
       playlistId: activePlaylistId,
@@ -194,6 +208,71 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme
   }, [settings.theme])
+
+  useEffect(() => {
+    const suppressContextMenu = (event: MouseEvent) => event.preventDefault()
+    window.addEventListener('contextmenu', suppressContextMenu)
+    return () => window.removeEventListener('contextmenu', suppressContextMenu)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void api
+      .checkUpdate()
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status)
+      })
+      .catch((error) => {
+        console.warn('Polysong updater check failed.', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Online/offline detection. When offline, streaming-only tracks are hidden
+  // from the library; when we come back online, refresh the availability check.
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true)
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
+
+  // Probe streaming track availability on startup and whenever we come back
+  // online. The backend HEAD-checks each source URL — anything that 404s gets
+  // marked unavailable and is filtered out of the visible track list.
+  useEffect(() => {
+    if (!isOnline) return
+    const streamingIds = libraryTracks
+      .filter((track) => track.streamingOnly)
+      .map((track) => track.id)
+    if (streamingIds.length === 0) {
+      setUnavailableTrackIds((prev) => (prev.size === 0 ? prev : new Set()))
+      return
+    }
+    let cancelled = false
+    void api
+      .checkTracksAvailability(streamingIds)
+      .then((results) => {
+        if (cancelled) return
+        const next = new Set<number>()
+        for (const result of results) {
+          if (!result.available) next.add(result.id)
+        }
+        setUnavailableTrackIds(next)
+      })
+      .catch((error) => {
+        console.warn('Polysong: track availability check failed.', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isOnline, libraryTracks])
 
   // Pull the membership for the active playlist so we can client-side filter
   // the visible track list to that playlist's contents — works even if the
@@ -285,6 +364,22 @@ function App() {
     [libraryTracks],
   )
 
+  // Streaming-aware view of the filtered track list. Streaming tracks are
+  // hidden when offline (no source = no playback) or when the backend's
+  // availability probe says the underlying URL is gone.
+  const visibleTracks = useMemo(() => {
+    return tracks.filter((track) => {
+      if (track.streamingOnly && !isOnline) return false
+      if (unavailableTrackIds.has(track.id)) return false
+      return true
+    })
+  }, [tracks, isOnline, unavailableTrackIds])
+
+  const hiddenOfflineCount = useMemo(() => {
+    if (isOnline) return 0
+    return tracks.filter((track) => track.streamingOnly).length
+  }, [tracks, isOnline])
+
   const currentScope = useMemo<PlaybackScope>(() => {
     if (activePlaylistId != null) {
       const found = playlists.find((p) => p.id === activePlaylistId)
@@ -298,19 +393,19 @@ function App() {
     setActiveTrack(track)
     const label = scopeLabel(currentScope)
     setQueueScope(currentScope)
-    audioEngine.startQueue(tracks, label, track.id)
+    audioEngine.startQueue(visibleTracks, label, track.id)
   }
 
   const togglePlay = async () => {
-    if (!activeTrack && tracks[0]) {
-      await selectAndPlay(tracks[0])
+    if (!activeTrack && visibleTracks[0]) {
+      await selectAndPlay(visibleTracks[0])
       return
     }
     if (!activeTrack) return
     if (audioEngine.currentTrack?.id !== activeTrack.id) {
       const label = scopeLabel(currentScope)
       setQueueScope(currentScope)
-      audioEngine.startQueue(tracks, label, activeTrack.id)
+      audioEngine.startQueue(visibleTracks, label, activeTrack.id)
       return
     }
     if (audioEngine.isPlaying) audioEngine.pause()
@@ -357,6 +452,16 @@ function App() {
   const updateSettings = async (patch: Partial<AppSettings>) => {
     const next = await api.updateSettings(patch)
     setSettings(next)
+  }
+
+  const installAvailableUpdate = async () => {
+    if (installingUpdate) return
+    setInstallingUpdate(true)
+    try {
+      await api.installUpdate()
+    } finally {
+      setInstallingUpdate(false)
+    }
   }
 
   const handleTrackDelete = async (track: Track) => {
@@ -485,10 +590,11 @@ function App() {
       data-left={leftPanelOpen ? 'open' : 'closed'}
       data-right={rightPanelOpen ? 'open' : 'closed'}
     >
+      <AppTitlebar />
       <aside className={`sidebar left ${leftPanelOpen ? 'open' : 'closed'}`} aria-label="Sources and playlists">
         <div className="brand">
           <div className="brand-mark" aria-hidden>
-            <Disc3 size={20} strokeWidth={2.4} />
+            <img src="/polysong-logo-v2.png" alt="" />
           </div>
           <div className="brand-name">
             <strong>Polysong</strong>
@@ -581,6 +687,18 @@ function App() {
           <Button icon={<Upload size={16} />} variant="primary" onClick={() => setIngestOpen(true)}>
             Ingest
           </Button>
+          {updateStatus?.available && (
+            <Button
+              icon={installingUpdate ? <Loader2 size={16} className="spin" /> : <Download size={16} />}
+              variant="primary"
+              className="update-button"
+              onClick={() => void installAvailableUpdate()}
+              disabled={installingUpdate}
+              aria-label={`Install Polysong ${updateStatus.latestVersion ?? 'update'}`}
+            >
+              {installingUpdate ? 'Updating' : `Update ${updateStatus.latestVersion ?? ''}`.trim()}
+            </Button>
+          )}
           <span className="topbar-divider" aria-hidden />
           <Button
             icon={settings.theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
@@ -635,15 +753,21 @@ function App() {
           </div>
         )}
 
+        {hiddenOfflineCount > 0 && (
+          <p className="offline-banner" role="status">
+            Offline — {hiddenOfflineCount} streaming {hiddenOfflineCount === 1 ? 'track' : 'tracks'} hidden
+          </p>
+        )}
+
         <section className="track-list" aria-label="Tracks">
-          {tracks.length === 0 && (
+          {visibleTracks.length === 0 && (
             <p className="track-list-empty">
               {activeJobs.length > 0
                 ? 'Waiting for the first imports to land — your library will populate as ingests finish.'
                 : 'No tracks match. Adjust filters or queue an ingest.'}
             </p>
           )}
-          {tracks.map((track) => (
+          {visibleTracks.map((track) => (
             <TrackRow
               key={track.id}
               track={track}
@@ -860,6 +984,35 @@ function App() {
   )
 }
 
+function AppTitlebar() {
+  const hasTauriWindow = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
+  const withAppWindow = (action: 'minimize' | 'toggleMaximize' | 'close') => {
+    if (!hasTauriWindow) return
+    const appWindow = getCurrentWindow()
+    void appWindow[action]().catch(() => undefined)
+  }
+
+  return (
+    <div className="app-titlebar" data-tauri-drag-region>
+      <div className="app-titlebar-brand" data-tauri-drag-region>
+        <img src="/polysong-logo-v2.png" alt="" data-tauri-drag-region />
+        <span data-tauri-drag-region>Polysong</span>
+      </div>
+      <div className="window-controls">
+        <button type="button" onClick={() => withAppWindow('minimize')} aria-label="Minimize">
+          <Minus size={14} />
+        </button>
+        <button type="button" onClick={() => withAppWindow('toggleMaximize')} aria-label="Maximize">
+          <Square size={12} />
+        </button>
+        <button type="button" className="close" onClick={() => withAppWindow('close')} aria-label="Close">
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function LoadingCard({ job }: { job: IngestJob }) {
   const pct = Math.round(Math.max(0, Math.min(1, job.progress)) * 100)
   return (
@@ -964,12 +1117,14 @@ function IngestDialog({
   const [input, setInput] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [streamingOnly, setStreamingOnly] = useState(false)
 
   useEffect(() => {
     if (!open) {
       setInput('')
       setFile(null)
       setSubmitting(false)
+      setStreamingOnly(false)
     }
   }, [open])
 
@@ -994,6 +1149,7 @@ function IngestDialog({
         advancedPublicSuno: settings.sunoAdvancedEnabled,
         consentAccepted: source === 'youtube' ? settings.youtubeConsent : source === 'suno' ? settings.sunoAdvancedEnabled : true,
         playlistId: activePlaylistId,
+        streamingOnly,
       })
       onQueued()
     } finally {
@@ -1085,6 +1241,21 @@ function IngestDialog({
             />
             Enable advanced public Suno URL mode for content I may import.
           </label>
+        )}
+        {source !== 'local' && (
+          <div className="streaming-option">
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={streamingOnly}
+                onChange={(event) => setStreamingOnly(event.target.checked)}
+              />
+              Streaming only (don't download audio)
+            </label>
+            <p className="streaming-helper">
+              <em>Streaming songs won't be playable offline and will disappear if the source is deleted.</em>
+            </p>
+          </div>
         )}
         <div className="modal-footer">
           <Button onClick={onClose}>Cancel</Button>

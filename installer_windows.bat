@@ -61,6 +61,7 @@ call :prepare_installer_tools || exit /b 1
 
 echo.
 echo == Building Polysong Windows installer ==
+set "POLYSONG_UPDATE_REPO=%GITHUB_REPO%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "& $env:TAURI_CLI build --bundles nsis --no-sign; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
 

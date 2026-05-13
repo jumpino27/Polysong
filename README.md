@@ -41,6 +41,22 @@ dist/installed.exe
 
 If you downloaded GitHub's `Source code (zip)` for a release, this script downloads that release's prebuilt Windows installer into `dist/installed.exe`. In a git checkout, it builds the installer locally.
 
+The installed Windows app checks GitHub releases on startup. If `https://github.com/jumpino27/Polysong` has a newer latest release than the running app version, Polysong shows an Update button in the app. Pressing it downloads that release's `installed.exe`, launches it, and exits so the installer can install the new version. This updates the app and any installer-managed bundled technologies, including helper tools such as `yt-dlp`, `ffmpeg`, and `ffprobe`.
+
+If you are editing the installer locally or making a custom build and do not want the installed app to update itself from this repo's GitHub releases, open `installer_windows.bat` and delete or empty this value near the top before building:
+
+```bat
+set "GITHUB_REPO=jumpino27/Polysong"
+```
+
+For example:
+
+```bat
+set "GITHUB_REPO="
+```
+
+With that value empty, the built app skips the GitHub release updater and only uses your local build.
+
 Run `dist/installed.exe` to install Polysong.
 
 The installer lets you choose the install directory. After installation, Polysong keeps its data beside the installed app:
@@ -79,6 +95,15 @@ Polysong/
 
 Polysong uses these bundled tools first, then falls back to tools on `PATH` if needed.
 
+The installer, installed Windows app, and `start_no_exe.bat` keep a small manifest beside the bundled helper tools. On startup/build they compare the manifest with GitHub's current `yt-dlp.exe` and FFmpeg LGPL release assets, then refresh the local `tools/` copies when upstream changed or files are missing. To force a helper refresh without changing the recipe, run:
+
+```bat
+set POLYSONG_REFRESH_INSTALLER_TOOLS=1
+installer_windows.bat
+```
+
+For an installed app, set `POLYSONG_DISABLE_TOOL_UPDATER=1` before launch to skip helper-tool update checks.
+
 ### Code Signing
 
 `installer_windows.bat` supports Authenticode signing if you provide a trusted code-signing certificate:
@@ -101,6 +126,8 @@ Without a trusted certificate, the installer is built unsigned and Windows Smart
 ## Run From The Codebase
 
 Use these scripts when you want to run Polysong locally from the source code instead of installing it.
+
+Source-run scripts update from git before starting. `start_no_exe.bat`, `start_no_exe.sh`, and `first_setup_no_exe.sh` run `git pull --ff-only` in a git checkout when there are no local tracked edits. The installed app does not use git; it updates only from GitHub releases.
 
 ### Windows
 
@@ -144,7 +171,7 @@ The installed Windows app keeps its own database and songs beside the installed 
 | `start_no_exe.bat` | Windows | Starts the Rust backend and the browser frontend for local source-code use. |
 | `first_setup_no_exe.sh` | Linux/macOS | Same idea as the Windows setup script, but for Unix-like systems. It also downloads local `yt-dlp`, `ffmpeg`, and `ffprobe` tools. |
 | `start_no_exe.sh` | Linux/macOS | Starts the local backend and browser frontend. |
-| `installer_windows.bat` | Windows | Builds the Windows installer and writes it to `dist/installed.exe`. |
+| `installer_windows.bat` | Windows | Builds the Windows installer, embeds the GitHub release updater target, refreshes installer-managed helper tools when their recipe changes, and writes the installer to `dist/installed.exe`. |
 
 ## Developer Commands
 

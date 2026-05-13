@@ -23,6 +23,11 @@ impl IngestSource for LocalSource {
     }
 
     fn prepare(&self, request: &IngestRequest) -> Result<Vec<IngestCandidate>> {
+        if request.streaming_only {
+            return Err(polysong_core::PolysongError::Message(
+                "local audio files cannot be streaming-only".to_owned(),
+            ));
+        }
         let path = Path::new(&request.input);
         let title = path
             .file_stem()
@@ -46,6 +51,8 @@ impl IngestSource for LocalSource {
             style_description: None,
             suno_prompt: None,
             lyrics: None,
+            streaming_only: false,
+            stream_url: None,
         }])
     }
 }

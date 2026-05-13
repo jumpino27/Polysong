@@ -175,6 +175,8 @@ export async function mockIngest(request: IngestRequest) {
       playCount: 0,
       addedAt: Date.now(),
       styleDescription: null,
+      streamingOnly: request.streamingOnly,
+      streamUrl: null,
     }
     tracks = [newTrack, ...tracks]
     trackId = newTrack.id

@@ -63,6 +63,11 @@ export function TrackRow({
         </button>
 
         <span className={`source-pill source-${track.source}`}>{sourceLabel(track.source)}</span>
+        {track.streamingOnly && (
+          <span className="source-pill streaming-pill" title="Streaming track — not downloaded locally">
+            Streaming
+          </span>
+        )}
 
         <span className="duration-cell">{formatDuration(track.durationMs)}</span>
 

@@ -1,5 +1,5 @@
 import type { Track } from '../../types'
-import { mediaUrl } from '../../lib/tauri'
+import { api, mediaUrl } from '../../lib/tauri'
 
 type EngineListener = () => void
 
@@ -198,6 +198,46 @@ class AudioEngine {
     this.position = this.playOrder.findIndex((idx) => this.queue[idx]?.id === track.id)
     this.isLoading = true
     this.notify()
+
+    // Streaming-only tracks: resolve the playable URL on demand and assign it
+    // directly to `audio.src`. We deliberately don't blob-fetch here — these
+    // are direct CDN URLs (YouTube/Suno) that honor Range requests, and
+    // preloading would defeat the point of streaming.
+    if (track.streamingOnly) {
+      if (this.currentBlobUrl) {
+        URL.revokeObjectURL(this.currentBlobUrl)
+        this.currentBlobUrl = null
+      }
+      try {
+        const streamUrl = await api.resolveStreamUrl(track.id)
+        if (loadId !== this.currentLoadId) return
+        if (!streamUrl) {
+          this.audio.src = ''
+          this.isLoading = false
+          this.notify()
+          return
+        }
+        this.audio.src = streamUrl
+      } catch (error) {
+        console.warn('Polysong: failed to resolve stream URL.', error)
+        if (loadId !== this.currentLoadId) return
+        this.audio.src = ''
+        this.isLoading = false
+        this.notify()
+        return
+      }
+      this.isLoading = false
+      this.notify()
+      if (loadId === this.currentLoadId && this.playOnReady) {
+        this.playOnReady = false
+        try {
+          await this.play()
+        } catch {
+          /* ignore */
+        }
+      }
+      return
+    }
 
     const url = this.resolveSource(track)
     if (!url) {

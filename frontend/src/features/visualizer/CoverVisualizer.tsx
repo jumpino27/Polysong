@@ -162,9 +162,12 @@ export function CoverVisualizer({ track, playing }: { track: Track | null; playi
 
       const img = imageRef.current
       if (img && img.complete && img.naturalWidth > 0) {
-        // Fit cover to circle, center-cropped.
-        const size = radius * 2
-        context.drawImage(img, -radius, -radius, size, size)
+        // Preserve the cover's aspect ratio inside the circle. YouTube
+        // thumbnails are often 16:9, so drawing them into a square would
+        // visibly stretch faces and text.
+        context.fillStyle = '#000'
+        context.fillRect(-radius, -radius, radius * 2, radius * 2)
+        drawImageContained(context, img, -radius, -radius, radius * 2, radius * 2)
       } else {
         // Fallback gradient disc.
         const cover = context.createLinearGradient(-radius, -radius, radius, radius)
@@ -216,6 +219,23 @@ function mixColor(a: string, b: string, t: number) {
   const g = Math.round(ca[1] + (cb[1] - ca[1]) * k)
   const bl = Math.round(ca[2] + (cb[2] - ca[2]) * k)
   return `rgb(${r}, ${g}, ${bl})`
+}
+
+function drawImageContained(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  const imageRatio = image.naturalWidth / image.naturalHeight
+  const targetRatio = width / height
+  const drawWidth = imageRatio > targetRatio ? width : height * imageRatio
+  const drawHeight = imageRatio > targetRatio ? width / imageRatio : height
+  const drawX = x + (width - drawWidth) / 2
+  const drawY = y + (height - drawHeight) / 2
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
 }
 
 function parseColor(input: string): [number, number, number] | null {

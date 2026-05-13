@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Polysong",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "dev.jumpino.polysong",
   "build": {
     "beforeDevCommand": "pnpm -C frontend dev",
@@ -16,7 +16,8 @@
         "width": 1280,
         "height": 820,
         "minWidth": 960,
-        "minHeight": 620
+        "minHeight": 620,
+        "decorations": false
       }
     ],
     "security": {

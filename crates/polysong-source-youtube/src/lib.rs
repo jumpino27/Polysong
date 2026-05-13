@@ -26,6 +26,14 @@ impl IngestSource for YoutubeSource {
             PolysongError::Message("YouTube URL must include a video id".to_owned())
         })?;
 
+        let (file_path, streaming_only) = if request.streaming_only {
+            // Sentinel keeps the unique-file-path constraint happy and lets
+            // callers detect a streaming-only row without checking the flag.
+            (format!("streaming://{source_id}"), true)
+        } else {
+            (format!("songs/youtube/{source_id}.mp3"), false)
+        };
+
         Ok(vec![IngestCandidate {
             source: AudioSource::Youtube,
             source_id: Some(source_id.clone()),
@@ -34,7 +42,7 @@ impl IngestSource for YoutubeSource {
             album: None,
             source_url: Some(canonical_youtube_url(&source_id)),
             original_input: Some(request.input.clone()),
-            file_path: format!("songs/youtube/{source_id}.mp3"),
+            file_path,
             download_url: None,
             cover_url: None,
             cover_path: None,
@@ -42,6 +50,8 @@ impl IngestSource for YoutubeSource {
             style_description: None,
             suno_prompt: None,
             lyrics: None,
+            streaming_only,
+            stream_url: None,
         }])
     }
 }
@@ -57,13 +67,33 @@ fn parse_video_id(input: &str) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-fn canonical_youtube_url(video_id: &str) -> String {
+/// Returns the `list=` query parameter when the URL points at a real
+/// user-curated playlist. Auto-generated radio mixes (list ids beginning
+/// with `RD`) are intentionally skipped — they expand to infinite mixes,
+/// not finite playlists, and ingesting them is never what the user wants.
+pub fn parse_playlist_id(input: &str) -> Option<String> {
+    let url = Url::parse(input).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    if !(host.contains("youtube.com") || host.contains("youtu.be")) {
+        return None;
+    }
+    let list_id = url
+        .query_pairs()
+        .find(|(key, _)| key == "list")
+        .map(|(_, value)| value.into_owned())?;
+    if list_id.starts_with("RD") {
+        return None;
+    }
+    Some(list_id)
+}
+
+pub fn canonical_youtube_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_video_id;
+    use super::{parse_playlist_id, parse_video_id};
 
     #[test]
     fn parses_equivalent_youtube_links() {
@@ -81,6 +111,24 @@ mod tests {
         assert_eq!(
             parse_video_id("https://youtu.be/r_0JjYUe5jo?si=iuygMA26CwADVo6D"),
             expected
+        );
+    }
+
+    #[test]
+    fn detects_real_playlist_and_skips_radio_mix() {
+        assert_eq!(
+            parse_playlist_id(
+                "https://www.youtube.com/watch?v=4l2oNxn3U5A&list=PLFv4HMVcYNE0ujMzn1fqXWnxCxytdj6Ek"
+            ),
+            Some("PLFv4HMVcYNE0ujMzn1fqXWnxCxytdj6Ek".to_owned())
+        );
+        assert_eq!(
+            parse_playlist_id("https://www.youtube.com/watch?v=abc&list=RDabc"),
+            None
+        );
+        assert_eq!(
+            parse_playlist_id("https://www.youtube.com/watch?v=abc"),
+            None
         );
     }
 }

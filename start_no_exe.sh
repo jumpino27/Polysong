@@ -27,6 +27,24 @@ fi
 
 cd "$PROJECT_DIR"
 
+update_source_checkout() {
+  if [[ ! -d "$PROJECT_DIR/.git" ]]; then
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Git was not found. Skipping source update." >&2
+    return 0
+  fi
+  if ! git diff --quiet -- . || ! git diff --cached --quiet -- .; then
+    echo "Local tracked changes are present. Skipping git pull to avoid overwriting edits." >&2
+    return 0
+  fi
+  echo "Checking for source updates from git..."
+  git pull --ff-only
+}
+
+update_source_checkout
+
 if ! command -v pnpm >/dev/null 2>&1; then
   echo "pnpm was not found. Run ./first_setup_no_exe.sh first." >&2
   exit 1

@@ -8,8 +8,8 @@ use polysong_db::Repository;
 use polysong_ingest::IngestRegistry;
 use polysong_source_local::LocalSource;
 use polysong_source_suno::SunoSource;
-use polysong_source_youtube::YoutubeSource;
-use serde::Deserialize;
+use polysong_source_youtube::{parse_playlist_id as parse_youtube_playlist_id, YoutubeSource};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -166,6 +166,15 @@ impl AppState {
     }
 
     fn ingest_url(&self, request: IngestRequest) -> Result<i64, String> {
+        // YouTube playlist URLs (those with a real `list=` id, not radio mixes)
+        // fan out into one sub-ingest per video so the user gets every track
+        // in the playlist instead of just the linked video.
+        if matches!(request.source, AudioSource::Youtube)
+            && parse_youtube_playlist_id(&request.input).is_some()
+        {
+            return self.ingest_youtube_playlist(request);
+        }
+
         // Dedup: if a track with this exact source URL already exists, skip
         // the network/registry step entirely and just record a completed job
         // for the existing track. This keeps re-ingesting the same Suno or
@@ -234,6 +243,74 @@ impl AppState {
                 Err(error.to_string())
             }
         }
+    }
+
+    fn ingest_youtube_playlist(&self, request: IngestRequest) -> Result<i64, String> {
+        let video_urls = enumerate_youtube_playlist(&self.data_dir, &request.input)?;
+        if video_urls.is_empty() {
+            return Err("YouTube playlist had no playable videos".to_owned());
+        }
+
+        let job_id = self
+            .repo
+            .lock()
+            .map_err(lock_err)?
+            .queue_ingest(&request)
+            .map_err(to_string)?;
+
+        let result: Result<i64, String> = (|| {
+            let mut first_track_id: Option<TrackId> = None;
+            for video_url in &video_urls {
+                // Per-video dedup: re-ingesting the same playlist (or one that
+                // overlaps with the library) becomes a no-op for known videos.
+                let existing = {
+                    let repo = self.repo.lock().map_err(lock_err)?;
+                    repo.find_track_by_source_url(video_url)
+                        .map_err(to_string)?
+                };
+                if let Some(existing_id) = existing {
+                    self.attach_to_requested_playlist(&request, existing_id)?;
+                    first_track_id.get_or_insert(existing_id);
+                    continue;
+                }
+
+                let sub_request = IngestRequest {
+                    input: video_url.clone(),
+                    playlist_id: None,
+                    ..request.clone()
+                };
+                let candidates = self
+                    .registry
+                    .prepare(&sub_request)
+                    .map_err(|error| error.to_string())?;
+                for mut candidate in candidates {
+                    materialize_candidate(&self.data_dir, &mut candidate)?;
+                    let track_id = self
+                        .repo
+                        .lock()
+                        .map_err(lock_err)?
+                        .insert_candidate(candidate)
+                        .map_err(to_string)?;
+                    self.attach_to_requested_playlist(&request, track_id)?;
+                    first_track_id.get_or_insert(track_id);
+                }
+            }
+            self.repo
+                .lock()
+                .map_err(lock_err)?
+                .complete_job(job_id, first_track_id.unwrap_or_default())
+                .map_err(to_string)?;
+            Ok(job_id)
+        })();
+
+        if let Err(error) = &result {
+            let _ = self
+                .repo
+                .lock()
+                .map_err(lock_err)?
+                .fail_job(job_id, error.as_str());
+        }
+        result
     }
 
     fn list_ingest_jobs(&self) -> Result<Vec<IngestJob>, String> {
@@ -308,6 +385,7 @@ impl AppState {
             advanced_public_suno: false,
             consent_accepted: true,
             playlist_id,
+            streaming_only: false,
         };
         let job_id = self
             .repo
@@ -346,6 +424,8 @@ impl AppState {
             style_description: None,
             suno_prompt: None,
             lyrics: None,
+            streaming_only: false,
+            stream_url: None,
         };
         enrich_local_metadata(&mut candidate, &destination, &self.data_dir);
         let track_id = self
@@ -468,6 +548,181 @@ fn set_track_playlists(
     state.set_track_playlists(track_id, playlist_ids)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackAvailability {
+    id: i64,
+    available: bool,
+    checked_at: i64,
+}
+
+#[tauri::command]
+async fn check_tracks_availability(
+    state: State<'_, Arc<AppState>>,
+    track_ids: Vec<i64>,
+) -> Result<Vec<TrackAvailability>, String> {
+    // Snapshot the (id, url, streaming?) tuples up front so the DB lock is
+    // not held across the async HEAD probes.
+    let probes: Vec<(i64, Option<String>, bool)> = {
+        let repo = state.repo.lock().map_err(lock_err)?;
+        track_ids
+            .iter()
+            .map(|id| match repo.get_track(*id) {
+                Ok(Some(track)) => (
+                    *id,
+                    if track.streaming_only {
+                        track.source_url.clone()
+                    } else {
+                        None
+                    },
+                    track.streaming_only,
+                ),
+                _ => (*id, None, false),
+            })
+            .collect()
+    };
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("Polysong/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(to_string)?;
+
+    let futures = probes.into_iter().map(|(id, url, streaming)| {
+        let client = client.clone();
+        async move {
+            if !streaming {
+                // Non-streaming tracks are local files — always "available"
+                // from the network's point of view. Frontend decides whether
+                // the file is actually present.
+                return TrackAvailability {
+                    id,
+                    available: true,
+                    checked_at: unix_ms(),
+                };
+            }
+            let Some(url) = url else {
+                return TrackAvailability {
+                    id,
+                    available: false,
+                    checked_at: unix_ms(),
+                };
+            };
+            let available = match client.head(&url).send().await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    (200..400).contains(&status)
+                }
+                Err(_) => false,
+            };
+            TrackAvailability {
+                id,
+                available,
+                checked_at: unix_ms(),
+            }
+        }
+    });
+
+    Ok(futures::future::join_all(futures).await)
+}
+
+#[tauri::command]
+async fn resolve_stream_url(
+    state: State<'_, Arc<AppState>>,
+    track_id: i64,
+) -> Result<String, String> {
+    let track = {
+        let repo = state.repo.lock().map_err(lock_err)?;
+        repo.get_track(track_id)
+            .map_err(to_string)?
+            .ok_or_else(|| format!("track {track_id} not found"))?
+    };
+
+    if !track.streaming_only {
+        return Ok(track.file_path);
+    }
+
+    match track.source {
+        AudioSource::Suno => {
+            if let Some(url) = track.stream_url.as_deref() {
+                if !url.is_empty() {
+                    return Ok(url.to_owned());
+                }
+            }
+            // Re-fetch from Suno using the stored source_id (which mirrors the
+            // CDN-bound clip id) and persist the freshly-issued audio URL.
+            let source_id = track
+                .source_id
+                .clone()
+                .ok_or_else(|| "Suno track missing source_id".to_owned())?;
+            let fetched: Result<String, String> = tauri::async_runtime::spawn_blocking(move || {
+                let url = format!("https://studio-api.prod.suno.com/api/clip/{source_id}");
+                let response = reqwest::blocking::Client::new()
+                    .get(url)
+                    .header(reqwest::header::USER_AGENT, "Polysong/0.1")
+                    .send()
+                    .map_err(|err| err.to_string())?
+                    .error_for_status()
+                    .map_err(|err| err.to_string())?;
+                let value: serde_json::Value =
+                    response.json().map_err(|err| err.to_string())?;
+                value
+                    .get("audio_url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned())
+                    .ok_or_else(|| "Suno clip response had no audio_url".to_owned())
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+            let audio_url = fetched?;
+            {
+                let repo = state.repo.lock().map_err(lock_err)?;
+                let _ = repo.update_stream_url(track_id, &audio_url);
+            }
+            Ok(audio_url)
+        }
+        AudioSource::Youtube => {
+            let source_url = track
+                .source_url
+                .clone()
+                .ok_or_else(|| "YouTube track missing source_url".to_owned())?;
+            let data_dir = state.data_dir.clone();
+            let resolved: Result<String, String> =
+                tauri::async_runtime::spawn_blocking(move || {
+                    let yt_dlp = ensure_yt_dlp(&data_dir)?;
+                    let output = yt_dlp
+                        .command()
+                        .arg("--no-warnings")
+                        .arg("--no-playlist")
+                        .arg("-f")
+                        .arg("bestaudio")
+                        .arg("--get-url")
+                        .arg(&source_url)
+                        .output()
+                        .map_err(|err| err.to_string())?;
+                    if !output.status.success() {
+                        return Err(format!(
+                            "yt-dlp --get-url exited with {}: {}",
+                            output.status,
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    stdout
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(|line| line.to_owned())
+                        .ok_or_else(|| "yt-dlp --get-url produced no URL".to_owned())
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+            resolved
+        }
+        AudioSource::Local => Ok(track.file_path),
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
@@ -488,6 +743,7 @@ fn main() {
                 AppState::open(data_dir)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
             );
+            start_helper_tool_updater(state.data_dir.clone());
             start_http_backend(state.clone());
             app.manage(state);
             Ok(())
@@ -507,7 +763,11 @@ fn main() {
             remove_track_from_playlist,
             list_track_playlists,
             set_track_playlists,
-            list_playlist_members
+            list_playlist_members,
+            check_tracks_availability,
+            resolve_stream_url,
+            check_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Polysong");
@@ -519,6 +779,378 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> String {
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn check_update() -> Result<UpdateStatus, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_owned();
+    let Some(repo) = update_repo() else {
+        return Ok(UpdateStatus::disabled(current_version));
+    };
+
+    if running_from_source_checkout() {
+        return Ok(UpdateStatus::disabled(current_version));
+    }
+
+    let release = latest_github_release(&repo)?;
+    let installer_url = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case("installed.exe"))
+        .map(|asset| asset.browser_download_url.clone());
+    let available = installer_url.is_some() && is_newer_version(&release.tag_name, &current_version);
+
+    Ok(UpdateStatus {
+        available,
+        disabled: false,
+        current_version,
+        latest_version: Some(release.tag_name),
+        installer_url,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn check_update() -> Result<UpdateStatus, String> {
+    Ok(UpdateStatus::disabled(env!("CARGO_PKG_VERSION").to_owned()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn install_update() -> Result<(), String> {
+    let Some(repo) = update_repo() else {
+        return Err("release updater is disabled for this build".to_owned());
+    };
+    if running_from_source_checkout() {
+        return Err("release updater is disabled while running from a source checkout".to_owned());
+    }
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    let release = latest_github_release(&repo)?;
+    if !is_newer_version(&release.tag_name, current_version) {
+        return Err("no newer release is available".to_owned());
+    }
+
+    let installer = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case("installed.exe"))
+        .ok_or_else(|| format!("release {} does not include installed.exe", release.tag_name))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("Polysong/{current_version}"))
+        .build()
+        .map_err(to_string)?;
+    let download_path = std::env::temp_dir().join(format!(
+        "polysong-update-{}.exe",
+        sanitize_update_tag(&release.tag_name)
+    ));
+    let bytes = client
+        .get(&installer.browser_download_url)
+        .send()
+        .map_err(to_string)?
+        .error_for_status()
+        .map_err(to_string)?
+        .bytes()
+        .map_err(to_string)?;
+    if bytes.len() < 1024 * 1024 {
+        return Err(format!(
+            "downloaded update installer was unexpectedly small: {} bytes",
+            bytes.len()
+        ));
+    }
+    std::fs::write(&download_path, bytes).map_err(to_string)?;
+
+    Command::new(&download_path).spawn().map_err(to_string)?;
+    std::process::exit(0);
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn install_update() -> Result<(), String> {
+    Err("release updater is only available for installed Windows builds".to_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn update_repo() -> Option<String> {
+    if cfg!(debug_assertions) || std::env::var_os("POLYSONG_DISABLE_APP_UPDATER").is_some() {
+        return None;
+    }
+    let repo = option_env!("POLYSONG_UPDATE_REPO")
+        .unwrap_or("jumpino27/Polysong")
+        .trim();
+    (!repo.is_empty()).then(|| repo.to_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn latest_github_release(repo: &str) -> Result<GithubRelease, String> {
+    let api_url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    reqwest::blocking::Client::builder()
+        .user_agent(format!("Polysong/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(to_string)?
+        .get(api_url)
+        .send()
+        .map_err(to_string)?
+        .error_for_status()
+        .map_err(to_string)?
+        .json::<GithubRelease>()
+        .map_err(to_string)
+}
+
+#[cfg(target_os = "windows")]
+fn running_from_source_checkout() -> bool {
+    std::env::current_dir()
+        .map(|dir| dir.join("package.json").exists() && dir.join("src-tauri").is_dir())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn is_newer_version(candidate: &str, current: &str) -> bool {
+    match (parse_version(candidate), parse_version(current)) {
+        (Some(candidate), Some(current)) => candidate > current,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+#[cfg(target_os = "windows")]
+fn sanitize_update_tag(tag: &str) -> String {
+    tag.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStatus {
+    available: bool,
+    disabled: bool,
+    current_version: String,
+    latest_version: Option<String>,
+    installer_url: Option<String>,
+}
+
+impl UpdateStatus {
+    fn disabled(current_version: String) -> Self {
+        Self {
+            available: false,
+            disabled: true,
+            current_version,
+            latest_version: None,
+            installer_url: None,
+        }
+    }
+}
+
+fn start_helper_tool_updater(data_dir: PathBuf) {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(move || {
+        if let Err(error) = update_windows_helper_tools(&data_dir) {
+            eprintln!("Polysong helper tool updater skipped: {error}");
+        }
+    });
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = data_dir;
+}
+
+#[cfg(target_os = "windows")]
+fn update_windows_helper_tools(data_dir: &Path) -> Result<(), String> {
+    if running_from_source_checkout() || std::env::var_os("POLYSONG_DISABLE_TOOL_UPDATER").is_some()
+    {
+        return Ok(());
+    }
+
+    const YT_DLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    const FFMPEG_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip";
+
+    let tools_dir = data_dir.join("tools");
+    std::fs::create_dir_all(&tools_dir).map_err(to_string)?;
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("Polysong/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(to_string)?;
+
+    let yt_dlp_asset_id = remote_asset_id(&client, YT_DLP_URL).ok();
+    let ffmpeg_asset_id = remote_asset_id(&client, FFMPEG_URL).ok();
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "tools": {
+            "ytDlp": {
+                "file": "yt-dlp.exe",
+                "url": YT_DLP_URL,
+                "assetId": yt_dlp_asset_id,
+            },
+            "ffmpeg": {
+                "files": ["ffmpeg.exe", "ffprobe.exe"],
+                "url": FFMPEG_URL,
+                "assetId": ffmpeg_asset_id,
+            },
+        },
+    });
+
+    let manifest_path = tools_dir.join("installer-tools.manifest.json");
+    let existing_manifest = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let recipe_changed = existing_manifest.as_ref() != Some(&manifest);
+
+    let yt_dlp = tools_dir.join("yt-dlp.exe");
+    if recipe_changed || !yt_dlp.exists() {
+        download_file(&client, YT_DLP_URL, &yt_dlp)?;
+    }
+
+    let ffmpeg = tools_dir.join("ffmpeg.exe");
+    let ffprobe = tools_dir.join("ffprobe.exe");
+    if recipe_changed || !ffmpeg.exists() || !ffprobe.exists() {
+        download_ffmpeg_tools(&client, FFMPEG_URL, &tools_dir)?;
+    }
+
+    std::fs::write(
+        manifest_path,
+        serde_json::to_vec_pretty(&manifest).map_err(to_string)?,
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn remote_asset_id(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
+    let response = client
+        .head(url)
+        .send()
+        .map_err(to_string)?
+        .error_for_status()
+        .map_err(to_string)?;
+    let headers = response.headers();
+    let mut parts = vec![response.url().to_string()];
+    for name in [
+        reqwest::header::ETAG,
+        reqwest::header::LAST_MODIFIED,
+        reqwest::header::CONTENT_LENGTH,
+    ] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            parts.push(value.to_owned());
+        }
+    }
+    Ok(parts.join("|"))
+}
+
+#[cfg(target_os = "windows")]
+fn download_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    let bytes = client
+        .get(url)
+        .send()
+        .map_err(to_string)?
+        .error_for_status()
+        .map_err(to_string)?
+        .bytes()
+        .map_err(to_string)?;
+    if bytes.len() < 1024 * 1024 {
+        return Err(format!(
+            "downloaded helper tool was unexpectedly small: {} bytes",
+            bytes.len()
+        ));
+    }
+    std::fs::write(destination, bytes).map_err(to_string)
+}
+
+#[cfg(target_os = "windows")]
+fn download_ffmpeg_tools(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    tools_dir: &Path,
+) -> Result<(), String> {
+    let cache_dir = std::env::temp_dir().join("polysong-helper-tools");
+    let zip_path = cache_dir.join("ffmpeg-master-latest-win64-lgpl.zip");
+    let extract_dir = cache_dir.join("ffmpeg");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir).map_err(to_string)?;
+    download_file(client, url, &zip_path)?;
+
+    let status = hidden_command("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg("Expand-Archive -LiteralPath $env:POLYSONG_FFMPEG_ZIP -DestinationPath $env:POLYSONG_FFMPEG_EXTRACT -Force")
+        .env("POLYSONG_FFMPEG_ZIP", &zip_path)
+        .env("POLYSONG_FFMPEG_EXTRACT", &extract_dir)
+        .status()
+        .map_err(to_string)?;
+    if !status.success() {
+        return Err(format!("FFmpeg archive extraction failed with {status}"));
+    }
+
+    let ffmpeg_source = find_file_recursive(&extract_dir, "ffmpeg.exe")
+        .ok_or_else(|| "FFmpeg archive did not contain ffmpeg.exe".to_owned())?;
+    let ffprobe_source = find_file_recursive(&extract_dir, "ffprobe.exe")
+        .ok_or_else(|| "FFmpeg archive did not contain ffprobe.exe".to_owned())?;
+    std::fs::copy(ffmpeg_source, tools_dir.join("ffmpeg.exe")).map_err(to_string)?;
+    std::fs::copy(ffprobe_source, tools_dir.join("ffprobe.exe")).map_err(to_string)?;
+    let _ = std::fs::remove_dir_all(cache_dir);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn find_file_recursive(root: &Path, file_name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(file_name))
+        {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_recursive(&path, file_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
@@ -1145,6 +1777,26 @@ struct PlaylistIdBody {
 }
 
 fn materialize_candidate(data_dir: &Path, candidate: &mut IngestCandidate) -> Result<(), String> {
+    // Streaming-only flow: fetch metadata + cover, but skip the audio
+    // download entirely. The candidate keeps a `streaming://<id>` sentinel
+    // file_path so the unique-file-path constraint is satisfied and the
+    // frontend can recognise non-downloaded rows.
+    if candidate.streaming_only {
+        match candidate.source {
+            AudioSource::Local => {
+                return Err("local audio files cannot be streaming-only".to_owned());
+            }
+            AudioSource::Youtube => {
+                enrich_youtube_metadata(candidate, data_dir);
+                download_cover(data_dir, candidate)?;
+            }
+            AudioSource::Suno => {
+                download_cover(data_dir, candidate)?;
+            }
+        }
+        return Ok(());
+    }
+
     let destination = data_dir.join(
         candidate
             .file_path
@@ -1242,6 +1894,43 @@ fn download_youtube(
         return Err("yt-dlp finished but did not produce a valid audio file".to_owned());
     }
     Ok(())
+}
+
+fn enumerate_youtube_playlist(data_dir: &Path, url: &str) -> Result<Vec<String>, String> {
+    let yt_dlp = ensure_yt_dlp(data_dir)?;
+    let output = yt_dlp
+        .command()
+        .arg("--flat-playlist")
+        .arg("--dump-single-json")
+        .arg("--no-warnings")
+        .arg(url)
+        .output()
+        .map_err(to_string)?;
+    if !output.status.success() {
+        return Err(format!(
+            "yt-dlp playlist enumeration exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let parsed: YtDlpPlaylistJson = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("yt-dlp playlist JSON parse failed: {error}"))?;
+    Ok(parsed
+        .entries
+        .into_iter()
+        .filter_map(|entry| entry.id.map(|id| format!("https://www.youtube.com/watch?v={id}")))
+        .collect())
+}
+
+#[derive(serde::Deserialize)]
+struct YtDlpPlaylistJson {
+    #[serde(default)]
+    entries: Vec<YtDlpPlaylistEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct YtDlpPlaylistEntry {
+    id: Option<String>,
 }
 
 fn enrich_youtube_metadata(candidate: &mut IngestCandidate, data_dir: &Path) {

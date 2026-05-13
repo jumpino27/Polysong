@@ -21,6 +21,8 @@ export interface Track {
   styleDescription?: string | null
   sunoPrompt?: string | null
   lyrics?: string | null
+  streamingOnly: boolean
+  streamUrl?: string | null
 }
 
 export interface TrackFilter {
@@ -55,6 +57,13 @@ export interface IngestRequest {
   advancedPublicSuno: boolean
   consentAccepted: boolean
   playlistId?: number | null
+  streamingOnly: boolean
+}
+
+export interface TrackAvailability {
+  id: number
+  available: boolean
+  checkedAt: number
 }
 
 export interface IngestJob {
@@ -82,4 +91,12 @@ export interface SettingsPatch {
   youtubeConsent?: boolean
   sunoAdvancedEnabled?: boolean
   maxConcurrentDownloads?: number
+}
+
+export interface UpdateStatus {
+  available: boolean
+  disabled: boolean
+  currentVersion: string
+  latestVersion?: string | null
+  installerUrl?: string | null
 }

@@ -192,6 +192,14 @@ impl Repository {
         Ok(())
     }
 
+    pub fn update_stream_url(&self, id: TrackId, stream_url: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET stream_url = ?1 WHERE id = ?2",
+            params![stream_url, id],
+        )?;
+        Ok(())
+    }
+
     pub fn find_track_by_source_url(&self, url: &str) -> Result<Option<TrackId>> {
         self.conn
             .query_row(
@@ -206,8 +214,8 @@ impl Repository {
         let now = now_ms();
         let file_path = candidate.file_path.clone();
         self.conn.execute(
-            "INSERT OR IGNORE INTO tracks (source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, style_description, suno_prompt, lyrics)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10, ?11, ?12, ?13)",
+            "INSERT OR IGNORE INTO tracks (source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, style_description, suno_prompt, lyrics, is_streaming_only, stream_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 candidate.source.to_string(),
                 candidate.source_id,
@@ -221,7 +229,9 @@ impl Repository {
                 now,
                 candidate.style_description,
                 candidate.suno_prompt,
-                candidate.lyrics
+                candidate.lyrics,
+                candidate.streaming_only as i64,
+                candidate.stream_url
             ],
         )?;
         if self.conn.changes() > 0 {
@@ -363,7 +373,7 @@ impl Repository {
 
     fn read_tracks(&self) -> Result<Vec<Track>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, last_played_at, style_description, suno_prompt, lyrics
+            "SELECT id, source, source_id, file_path, title, artist, album, duration_ms, cover_path, source_url, favorite, play_count, added_at, last_played_at, style_description, suno_prompt, lyrics, is_streaming_only, stream_url
              FROM tracks ORDER BY added_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -386,6 +396,8 @@ impl Repository {
                 style_description: row.get(14)?,
                 suno_prompt: row.get(15)?,
                 lyrics: row.get(16)?,
+                streaming_only: row.get::<_, i64>(17)? != 0,
+                stream_url: row.get(18)?,
             })
         })?;
         rows.collect()
@@ -412,7 +424,9 @@ impl Repository {
                 last_played_at INTEGER,
                 style_description TEXT,
                 suno_prompt TEXT,
-                lyrics TEXT
+                lyrics TEXT,
+                is_streaming_only INTEGER NOT NULL DEFAULT 0,
+                stream_url TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source);
             CREATE INDEX IF NOT EXISTS idx_tracks_added_at ON tracks(added_at);
@@ -445,7 +459,33 @@ impl Repository {
                 value TEXT NOT NULL
             );
             ",
-        )
+        )?;
+
+        // Guarded column additions for pre-existing databases. SQLite has no
+        // IF NOT EXISTS for ADD COLUMN, so we inspect the table_info pragma
+        // and only run the ALTER when the column is genuinely missing.
+        self.ensure_column("tracks", "is_streaming_only", "INTEGER NOT NULL DEFAULT 0")?;
+        self.ensure_column("tracks", "stream_url", "TEXT")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, decl: &str) -> Result<()> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let mut rows = stmt.query([])?;
+        let mut exists = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                exists = true;
+                break;
+            }
+        }
+        if !exists {
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+            self.conn.execute(&sql, [])?;
+        }
+        Ok(())
     }
 
     fn cleanup_placeholder_content(&self) -> Result<()> {

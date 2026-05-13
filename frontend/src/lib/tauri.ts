@@ -6,8 +6,10 @@ import type {
   Playlist,
   SettingsPatch,
   Track,
+  TrackAvailability,
   TrackFilter,
   TrackPatch,
+  UpdateStatus,
 } from '../types'
 import {
   mockAddTrackToPlaylist,
@@ -115,6 +117,7 @@ export const api = {
         advancedPublicSuno: false,
         consentAccepted: true,
         playlistId,
+        streamingOnly: false,
       })
     }
   },
@@ -140,6 +143,25 @@ export const api = {
     call<number[]>('list_playlist_members', { playlistId }, () =>
       mockListPlaylistMembers(playlistId),
     ),
+  checkTracksAvailability: (trackIds: number[]) =>
+    call<TrackAvailability[]>(
+      'check_tracks_availability',
+      { trackIds },
+      async () => trackIds.map((id) => ({ id, available: true, checkedAt: Date.now() })),
+    ),
+  resolveStreamUrl: (trackId: number) =>
+    call<string>('resolve_stream_url', { trackId }, async () => ''),
+  checkUpdate: () => {
+    const disabled = async (): Promise<UpdateStatus> => ({
+      available: false,
+      disabled: true,
+      currentVersion: 'browser-preview',
+      latestVersion: null,
+      installerUrl: null,
+    })
+    return hasTauri ? call<UpdateStatus>('check_update', {}, disabled) : disabled()
+  },
+  installUpdate: () => (hasTauri ? call<void>('install_update', {}, async () => undefined) : Promise.resolve()),
 }
 
 export function mediaUrl(path?: string | null) {

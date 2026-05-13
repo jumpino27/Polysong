@@ -24,13 +24,37 @@ impl IngestSource for SunoSource {
         }
 
         if let Some(playlist_id) = parse_suno_playlist_id(&request.input) {
-            return fetch_playlist(&playlist_id, &request.input);
+            let mut candidates = fetch_playlist(&playlist_id, &request.input)?;
+            if request.streaming_only {
+                for candidate in candidates.iter_mut() {
+                    apply_streaming(candidate);
+                }
+            }
+            return Ok(candidates);
         }
 
         let source_id = resolve_suno_song_id(&request.input)?;
         let clip = fetch_clip(&source_id)?;
-        Ok(vec![clip.into_candidate(Some(request.input.clone()), None)])
+        let mut candidate = clip.into_candidate(Some(request.input.clone()), None);
+        if request.streaming_only {
+            apply_streaming(&mut candidate);
+        }
+        Ok(vec![candidate])
     }
+}
+
+/// Flip a freshly-built Suno candidate into streaming-only mode: keep all
+/// metadata, swap the local `file_path` for a `streaming://` sentinel so it
+/// stays unique against `tracks.file_path UNIQUE`, and stash the CDN
+/// `download_url` into `stream_url` for playback.
+fn apply_streaming(candidate: &mut IngestCandidate) {
+    candidate.streaming_only = true;
+    candidate.stream_url = candidate.download_url.clone();
+    let id = candidate
+        .source_id
+        .clone()
+        .unwrap_or_else(|| format!("suno-{}", candidate.title));
+    candidate.file_path = format!("streaming://{id}");
 }
 
 fn fetch_clip(source_id: &str) -> Result<SunoClip> {
@@ -228,6 +252,8 @@ impl SunoClip {
             style_description,
             suno_prompt,
             lyrics: None,
+            streaming_only: false,
+            stream_url: None,
         }
     }
 }

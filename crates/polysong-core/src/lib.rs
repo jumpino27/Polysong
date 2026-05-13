@@ -57,6 +57,10 @@ pub struct Track {
     pub style_description: Option<String>,
     pub suno_prompt: Option<String>,
     pub lyrics: Option<String>,
+    #[serde(default)]
+    pub streaming_only: bool,
+    #[serde(default)]
+    pub stream_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -99,6 +103,8 @@ pub struct IngestRequest {
     pub advanced_public_suno: bool,
     pub consent_accepted: bool,
     pub playlist_id: Option<PlaylistId>,
+    #[serde(default)]
+    pub streaming_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +125,10 @@ pub struct IngestCandidate {
     pub style_description: Option<String>,
     pub suno_prompt: Option<String>,
     pub lyrics: Option<String>,
+    #[serde(default)]
+    pub streaming_only: bool,
+    #[serde(default)]
+    pub stream_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
